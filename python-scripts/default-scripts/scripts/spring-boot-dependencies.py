@@ -7,9 +7,8 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 import xml.etree.ElementTree as ET
 import argparse
-import urllib.request
-import urllib.parse
 import json
+import requests
 
 TEMP_BOOT_DIR = Path("spring-boot-temp-project")
 TEMP_CLOUD_DIR = Path("spring-cloud-temp-project")
@@ -118,20 +117,19 @@ def print_dependency_version(deps: set, name: str, filter: str):
 def get_latest_version(group_id, artifact_id):
     base_url = "https://search.maven.org/solrsearch/select"
     query = f'g:{group_id} AND a:{artifact_id}'
-    encoded_query = urllib.parse.quote(query, safe=':') 
-    full_url = f"{base_url}?q={encoded_query}&rows=1&wt=json"
-
+    params = {
+        "q": query,
+        "rows": 1,
+        "wt": "json"
+    }
     try:
-        with urllib.request.urlopen(full_url) as response:
-            if response.status != 200:
-                raise Exception(f"Erreur HTTP: {response.status}")
-            data = json.loads(response.read().decode())
-
-            docs = data.get("response", {}).get("docs", [])
-            if not docs:
-                raise Exception(f"Aucune version trouvée pour {group_id}:{artifact_id}")
-            return docs[0]["latestVersion"]
-
+        response = requests.get(base_url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        docs = data.get("response", {}).get("docs", [])
+        if not docs:
+            raise Exception(f"Aucune version trouvée pour {group_id}:{artifact_id}")
+        return docs[0].get("latestVersion")
     except Exception as e:
         print(f"❌ Erreur lors de la récupération de la version : {e}")
         return None
@@ -143,8 +141,9 @@ def get_dependency_version(group_id, artifact_id, version, dep_group_id, dep_art
     group_path = group_id.replace('.', '/')
     pom_url = f"https://repo1.maven.org/maven2/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
     try:
-        with urllib.request.urlopen(pom_url) as response:
-            pom_xml = response.read()
+        response = requests.get(pom_url, timeout=10)
+        response.raise_for_status()
+        pom_xml = response.content
         root = ET.fromstring(pom_xml)
         ns = {'m': 'http://maven.apache.org/POM/4.0.0'}
         for dep in root.findall('.//m:dependency', ns):

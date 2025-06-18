@@ -25,10 +25,11 @@ def main():
     shell_group = parser.add_mutually_exclusive_group()
     shell_group.add_argument('--bash', action='store_true', help="Use bash as entrypoint")
     shell_group.add_argument('--sh', action='store_true', help="Use sh as entrypoint")
-    volume_group = parser.add_mutually_exclusive_group()
-    volume_group.add_argument('-v', '--volume', action='store_true', help="Mount ~/docker-mnt/<image_tag> to /mnt/docker-mnt")
-    volume_group.add_argument('-vc', '--volume-current', action='store_true', help="Mount current directory to /mnt/docker-mnt")
+    mount_group = parser.add_mutually_exclusive_group()
+    mount_group.add_argument('-m', '--mount', action='store_true', help="Mount ~/docker-mnt/<image_tag> to /mnt/docker-mnt")
+    mount_group.add_argument('-mc', '--mount-current', action='store_true', help="Mount current directory to /mnt/docker-mnt")
     parser.add_argument('-i', '--image', type=str, help="Docker image to run (skip fzf selection)")
+    parser.add_argument('-v', '--verbose', action='store_true', help="Print the docker command instead of executing it")
     args = parser.parse_args()
 
     entrypoint = "bash" if args.bash or (not args.sh and not args.bash) else "sh"
@@ -49,18 +50,24 @@ def main():
         "docker", "run", "--rm", "-it",
         "--entrypoint", entrypoint
     ]
-    if args.volume_current:
+    if args.mount_current:
         cwd = os.getcwd()
         cmd += ["-v", f"{cwd}:/mnt/docker-mnt"]
-    elif args.volume:
+    elif args.mount:
         user_home = os.path.expanduser("~")
         mount_path = os.path.join(user_home, "docker-mnt", image)
         os.makedirs(mount_path, exist_ok=True)
         cmd += ["-v", f"{mount_path}:/mnt/docker-mnt"]
     cmd.append(image)
 
-    # Launch the container
-    os.execvp(cmd[0], cmd)
+    if args.verbose:
+        if args.mount_current:
+            # Replace the python version of the mount arg by a shell version for printing
+            cmd[-2] = "$(pwd):/mnt/docker-mnt"
+        print(" ".join(cmd))
+    else:
+        # Launch the container
+        os.execvp(cmd[0], cmd)
 
 if __name__ == "__main__":
     main()

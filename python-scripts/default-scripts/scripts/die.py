@@ -8,7 +8,7 @@ from iterfzf import iterfzf
 
 def get_docker_images():
     result = subprocess.run(
-        ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}"],
+        ["docker", "image", "ls", "--filter", "dangling=false", "--format", "{{.Repository}}:{{.Tag}}\t{{.CreatedSince}}"],
         stdout=subprocess.PIPE,
         text=True,
         check=True
@@ -70,4 +70,8 @@ def main():
         os.execvp(cmd[0], cmd)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nOpération annulée. (ctrl+c)")
+        sys.exit(0)

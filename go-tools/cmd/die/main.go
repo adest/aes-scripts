@@ -18,9 +18,9 @@ var rootCmd *cobra.Command
 func init() {
 
 	rootCmd = &cobra.Command{
-		Use:   "die2",
+		Use:   "die",
 		Short: "A tool to run Docker images with an interactive selection",
-		Long:  "die2 is a CLI tool that lists your Docker images and lets you select one to run with various options.",
+		Long:  "die is a CLI tool that lists your Docker images and lets you select one to run with various options.",
 		Run:   run,
 	}
 

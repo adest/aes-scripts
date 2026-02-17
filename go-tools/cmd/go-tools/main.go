@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"go-tools/pkg/lib"
 )
 
 func main() {
@@ -28,12 +29,12 @@ func main() {
 	repoRoot := getRepoRoot()
 	targetDir := filepath.Join(os.Getenv("HOME"), ".local", "go-tools", "bin")
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		exit(err)
+		lib.Exit(err)
 	}
 	cmdDir := filepath.Join(repoRoot, "cmd")
 	entries, err := os.ReadDir(cmdDir)
 	if err != nil {
-		exit(err)
+		lib.Exit(err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -52,7 +53,7 @@ func main() {
 		build.Stdout = os.Stdout
 		build.Stderr = os.Stderr
 		if err := build.Run(); err != nil {
-			exit(err)
+			lib.Exit(err)
 		}
 	}
 	fmt.Println("✅ Installed to", targetDir)
@@ -68,7 +69,7 @@ func getRepoRoot() string {
 	if hardcodedRepoRoot != "" {
 		return hardcodedRepoRoot
 	}
-	exit(fmt.Errorf("GO_TOOLS_ROOT_DIR not set and hardcodedRepoRoot is empty"))
+	lib.Exit(fmt.Errorf("GO_TOOLS_ROOT_DIR not set and hardcodedRepoRoot is empty"))
 	return "" // unreachable
 }
 
@@ -78,7 +79,7 @@ func cleanBinaries() {
 	fmt.Println("Suppression de tous les binaires dans", targetDir)
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
-		exit(err)
+		lib.Exit(err)
 	}
 	for _, e := range entries {
 		if e.IsDir() {
@@ -92,9 +93,4 @@ func cleanBinaries() {
 		}
 	}
 	fmt.Println("Nettoyage terminé.")
-}
-
-func exit(err error) {
-	fmt.Fprintln(os.Stderr, "Error:", err)
-	os.Exit(1)
 }

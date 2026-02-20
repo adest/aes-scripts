@@ -2,24 +2,41 @@ package main
 
 import (
 	"fmt"
+	"go-tools/pkg/lib"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+
 	"github.com/spf13/cobra"
-	"go-tools/pkg/lib"
 )
 
 func newInstallCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install go-tools binaries",
-		RunE: runInstall,
+		RunE:  runInstall,
 	}
 	return cmd
 }
 
 func runInstall(cmd *cobra.Command, args []string) error {
 	repoRoot := getRepoRoot()
+	goModPath := filepath.Join(repoRoot, "go.mod")
+	if st, err := os.Stat(goModPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf(
+				"invalid GO_TOOLS_ROOT_DIR (%q): no go.mod found at %q\n\n"+
+					"Fix: set GO_TOOLS_ROOT_DIR to the go-tools repository root (the folder that contains go.mod).\n"+
+					"Tip: if you use this repo's setup, run setup.sh to generate cmd/go-tools/config_local.go",
+				repoRoot,
+				goModPath,
+			)
+		}
+		return fmt.Errorf("failed to stat %q: %w", goModPath, err)
+	} else if st.IsDir() {
+		return fmt.Errorf("invalid module root: %q is a directory", goModPath)
+	}
 	targetDir := filepath.Join(os.Getenv("HOME"), ".local", "go-tools", "bin")
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return err
@@ -37,16 +54,20 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		if name == "go-tools" {
 			continue
 		}
-		fmt.Println("→ Building", name)
-		build := exec.Command(
-			"go", "build",
-			"-o", filepath.Join(targetDir, name),
-			filepath.Join(cmdDir, name),
+		fmt.Println("→ Installing", name)
+		install := exec.Command(
+			"go", "install",
+			"./cmd/"+name,
 		)
-		build.Stdout = os.Stdout
-		build.Stderr = os.Stderr
-		if err := build.Run(); err != nil {
-			return err
+		// Run from module root so the go tool can discover go.mod.
+		install.Dir = repoRoot
+		// Install into our target directory (rather than GOPATH/bin).
+		install.Env = append(os.Environ(), "GOBIN="+targetDir)
+		install.Stdout = os.Stdout
+		install.Stderr = os.Stderr
+		if err := install.Run(); err != nil {
+			repro := "cd " + repoRoot + " && GOBIN=" + targetDir + " " + strings.Join(install.Args, " ")
+			return fmt.Errorf("install failed for %q\ncommand: %s\nerror: %w", name, repro, err)
 		}
 	}
 	fmt.Println("✅ Installed to", targetDir)

@@ -12,15 +12,19 @@ import (
 )
 
 func newInstallCommand() *cobra.Command {
+	var allFlag bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install go-tools binaries",
-		RunE:  runInstall,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInstall(cmd, args, allFlag)
+		},
 	}
+	cmd.Flags().BoolVar(&allFlag, "all", false, "Install all binaries, including go-tools itself")
 	return cmd
 }
 
-func runInstall(cmd *cobra.Command, args []string) error {
+func runInstall(cmd *cobra.Command, args []string, all bool) error {
 	repoRoot := getRepoRoot()
 	goModPath := filepath.Join(repoRoot, "go.mod")
 	if st, err := os.Stat(goModPath); err != nil {
@@ -51,7 +55,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		name := e.Name()
-		if name == "go-tools" {
+		if !all && name == "go-tools" {
 			continue
 		}
 		fmt.Println("→ Installing", name)

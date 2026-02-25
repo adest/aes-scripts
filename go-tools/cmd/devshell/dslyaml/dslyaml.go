@@ -8,14 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Document is the YAML-level wrapper format that can embed both type definitions and nodes.
+// Document is the YAML-level representation of a DSL file.
 //
-// YAML forms supported:
-// - Mapping form (preferred): { types: {<name>: <RawNode>}, nodes: [<RawNode>...] }
-// - Shorthand form (backward-compatible): a root YAML sequence is interpreted as nodes only.
-//
-// This package lives outside `dsl` on purpose: it handles I/O and YAML document conventions.
-// The `dsl` package remains focused on the execution model, validation and expansion.
+// Two forms are supported:
+//   - Mapping form (preferred): a mapping with "types" and "nodes" keys.
+//   - Shorthand form (backward-compatible): a bare sequence, interpreted as nodes only.
 type Document struct {
 	Types map[string]dsl.RawNode `yaml:"types,omitempty"`
 	Nodes []dsl.RawNode          `yaml:"nodes,omitempty"`
@@ -50,12 +47,13 @@ func Parse(in []byte) (Document, error) {
 	}
 }
 
-// NewRegistryFromDocuments creates a new empty DSL registry and registers all types from the provided documents.
+// NewRegistryFromDocuments builds a Registry from the type definitions in all provided documents.
+// Returns an error if the same type name appears in more than one document.
 func NewRegistryFromDocuments(docs ...Document) (*dsl.Registry, error) {
 	reg := dsl.NewRegistry()
 	for _, doc := range docs {
-		for typeName, def := range doc.Types {
-			if err := reg.Register(typeName, dsl.TypeDefinition{Expand: def}); err != nil {
+		for typeName, raw := range doc.Types {
+			if err := reg.Register(typeName, raw); err != nil {
 				return nil, fmt.Errorf("phase=parse path=<doc>: register type %q: %w", typeName, err)
 			}
 		}
@@ -63,8 +61,7 @@ func NewRegistryFromDocuments(docs ...Document) (*dsl.Registry, error) {
 	return reg, nil
 }
 
-// Build builds a runtime model from one YAML document.
-// Types are loaded from `types`, then nodes from `nodes` are built with an initially empty registry.
+// Build parses a single YAML document and returns the runtime execution tree.
 func Build(in []byte) (*dsl.Container, error) {
 	doc, err := Parse(in)
 	if err != nil {
@@ -73,8 +70,8 @@ func Build(in []byte) (*dsl.Container, error) {
 	return BuildFromDocuments(doc)
 }
 
-// BuildMany builds a runtime model from multiple YAML documents.
-// Types are merged from all documents, and nodes are concatenated in order.
+// BuildMany parses multiple YAML documents, merges their types, concatenates their
+// nodes in order, and returns the runtime execution tree.
 func BuildMany(inputs ...[]byte) (*dsl.Container, error) {
 	docs := make([]Document, 0, len(inputs))
 	for _, in := range inputs {
@@ -87,7 +84,8 @@ func BuildMany(inputs ...[]byte) (*dsl.Container, error) {
 	return BuildFromDocuments(docs...)
 }
 
-// BuildFromDocuments builds a runtime model from already parsed documents.
+// BuildFromDocuments builds the runtime execution tree from already-parsed documents.
+// Types are merged across all documents; nodes are concatenated in order.
 func BuildFromDocuments(docs ...Document) (*dsl.Container, error) {
 	var nodes []dsl.RawNode
 	for _, doc := range docs {
@@ -102,6 +100,5 @@ func BuildFromDocuments(docs ...Document) (*dsl.Container, error) {
 		return nil, err
 	}
 
-	eng := dsl.NewEngine(reg)
-	return eng.Build(nodes)
+	return dsl.NewEngine(reg).Build(nodes)
 }

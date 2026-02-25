@@ -2,124 +2,192 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"go-tools/cmd/devshell/dsl"
 	"go-tools/cmd/devshell/dslyaml"
 
-	"gopkg.in/yaml.v3"
+	"github.com/spf13/cobra"
 )
 
-type outNode struct {
-	Name     string    `yaml:"name"`
-	Command  string    `yaml:"command,omitempty"`
-	Children []outNode `yaml:"children,omitempty"`
-}
-
-func toOutNode(n dsl.Node) outNode {
-	switch x := n.(type) {
-	case *dsl.Runnable:
-		return outNode{Name: x.Name(), Command: x.Command}
-	case *dsl.Container:
-		children := make([]outNode, 0, len(x.Children))
-		for _, c := range x.Children {
-			children = append(children, toOutNode(c))
-		}
-		return outNode{Name: x.Name(), Children: children}
-	default:
-		return outNode{Name: n.Name()}
-	}
-}
-
 func main() {
-	// Example 1: full YAML document (types + nodes in a single document)
-	exampleYAML := `
-types:
-  docker-compose:
-    name: compose
-    children:
-      - name: up
-        command: docker compose up -d
-      - name: down
-        command: docker compose down
+	var yamlPath string
 
-nodes:
-  - name: app
-    children:
-      - name: backend
-        children:
-          - name: build
-            command: go build ./...
-          - name: test
-            command: go test ./...
-      - name: stack
-        uses:
-          - docker-compose
-
-  - name: frontend
-    command: npm run dev
-`
-	fmt.Println("--- Example 1: Source YAML ---")
-	fmt.Print(exampleYAML)
-	fmt.Println("--- Example 1: Derived Model YAML ---")
-	printDerived(exampleYAML)
-
-	// Example 2: split YAML (types in one document, nodes in another)
-	typesYAML := `
-types:
-  docker-compose:
-    name: compose
-    children:
-      - name: up
-        command: docker compose up -d
-      - name: down
-        command: docker compose down
-`
-
-	nodesYAML := `
-- name: app
-  children:
-    - name: stack
-      uses:
-        - docker-compose
-    - name: backend
-      children:
-        - name: build
-          command: go build ./...
-- name: frontend
-  command: npm run dev
-`
-
-	fmt.Println("--- Example 2: Source YAML (types) ---")
-	fmt.Print(typesYAML)
-	fmt.Println("--- Example 2: Source YAML (nodes) ---")
-	fmt.Print(nodesYAML)
-	fmt.Println("--- Example 2: Derived Model YAML ---")
-	root, err := dslyaml.BuildMany([]byte(typesYAML), []byte(nodesYAML))
-	if err != nil {
-		log.Fatalf("engine build: %v", err)
+	rootCmd := &cobra.Command{
+		Use:               "devshell [command ...]",
+		Short:             "Dynamic devshell CLI",
+		Long:              "Dynamic devshell CLI\n\nTasks are auto-completable via shell completion (Tab).",
+		ValidArgsFunction: dynamicCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			root, err := loadDsl(yamlPath)
+			if err != nil {
+				return err
+			}
+			runnable, extraArgs, err := resolvePath(root, args)
+			if err != nil {
+				return err
+			}
+			return execute(runnable, extraArgs)
+		},
 	}
-	printDerivedFromRoot(root)
+
+	rootCmd.Flags().StringVarP(&yamlPath, "file", "f", "", "YAML config file (default: ~/.devshell/devshell.config.yml)")
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
 
-func printDerived(exampleYAML string) {
-	root, err := dslyaml.Build([]byte(exampleYAML))
-	if err != nil {
-		log.Fatalf("engine build: %v", err)
+// loadDsl reads and builds the DSL model from the given path,
+// defaulting to ~/.devshell/devshell.config.yml.
+func loadDsl(path string) (*dsl.Container, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("could not determine home directory: %w", err)
+		}
+		path = filepath.Join(home, ".devshell", "devshell.config.yml")
 	}
-	printDerivedFromRoot(root)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	root, err := dslyaml.Build(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build DSL model: %w", err)
+	}
+	return root, nil
 }
 
-func printDerivedFromRoot(root *dsl.Container) {
-	outs := make([]outNode, 0, len(root.Children))
-	for _, n := range root.Children {
-		outs = append(outs, toOutNode(n))
+// resolvePath walks args greedily to find the target Runnable.
+// Once a Runnable is reached, any remaining args are returned as extra args
+// to be appended to the command. Use -- to pass flag-like extra args without
+// Cobra intercepting them (e.g. devshell backend build -- --race).
+func resolvePath(root *dsl.Container, args []string) (*dsl.Runnable, []string, error) {
+	var current dsl.Node = root
+	var navigated []string
+
+	for i, arg := range args {
+		if r, ok := dsl.AsRunnable(current); ok {
+			// Already at a Runnable: the remaining args go to the command.
+			return r, args[i:], nil
+		}
+		c, _ := dsl.AsContainer(current)
+		child, ok := c.Find(arg)
+		if !ok {
+			return nil, nil, notFoundError(arg, navigated, c)
+		}
+		navigated = append(navigated, arg)
+		current = child
 	}
 
-	outBytes, err := yaml.Marshal(outs)
+	if r, ok := dsl.AsRunnable(current); ok {
+		return r, nil, nil
+	}
+	c, _ := dsl.AsContainer(current)
+	return nil, nil, isContainerError(navigated, c)
+}
+
+// execute runs a Runnable with its configured cwd and env.
+// Extra args are appended to the command string.
+func execute(r *dsl.Runnable, extraArgs []string) error {
+	command := r.Command
+	if len(extraArgs) > 0 {
+		command = command + " " + strings.Join(extraArgs, " ")
+	}
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if r.Cwd != "" {
+		cmd.Dir = r.Cwd
+	}
+
+	// Inherit the current environment and overlay with node-specific variables.
+	cmd.Env = os.Environ()
+	for k, v := range r.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+
+	return cmd.Run()
+}
+
+// dynamicCompletion provides shell completion for devshell commands.
+func dynamicCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	root, err := loadDsl(cmd.Flag("file").Value.String())
 	if err != nil {
-		log.Fatalf("yaml marshal: %v", err)
+		return nil, cobra.ShellCompDirectiveError
 	}
 
-	fmt.Print(string(outBytes))
+	node, ok := navigate(root, args)
+	if !ok {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	c, ok := dsl.AsContainer(node)
+	if !ok {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	var suggestions []string
+	for _, child := range c.Children {
+		if strings.HasPrefix(child.Name(), toComplete) {
+			suggestions = append(suggestions, child.Name())
+		}
+	}
+	return suggestions, cobra.ShellCompDirectiveNoFileComp
+}
+
+// navigate walks the tree following path segments and returns the deepest reachable node.
+// Unlike resolvePath, it does not error on containers — it is used for completion.
+func navigate(root *dsl.Container, path []string) (dsl.Node, bool) {
+	var current dsl.Node = root
+	for _, seg := range path {
+		c, ok := dsl.AsContainer(current)
+		if !ok {
+			return nil, false
+		}
+		child, ok := c.Find(seg)
+		if !ok {
+			return nil, false
+		}
+		current = child
+	}
+	return current, true
+}
+
+// notFoundError reports which command was not found and lists valid alternatives.
+func notFoundError(arg string, navigated []string, c *dsl.Container) error {
+	location := "top level"
+	if len(navigated) > 0 {
+		location = fmt.Sprintf("'%s'", strings.Join(navigated, " "))
+	}
+	return fmt.Errorf("%q not found at %s\navailable: %s", arg, location, childList(c))
+}
+
+// isContainerError reports that a container was reached instead of a runnable,
+// and lists its available subcommands.
+func isContainerError(navigated []string, c *dsl.Container) error {
+	name := strings.Join(navigated, " ")
+	if name == "" {
+		name = "top level"
+	}
+	return fmt.Errorf("%q is a container, not a runnable\navailable subcommands: %s", name, childList(c))
+}
+
+// childList returns a human-readable comma-separated list of a container's child names.
+func childList(c *dsl.Container) string {
+	names := make([]string, len(c.Children))
+	for i, child := range c.Children {
+		names[i] = child.Name()
+	}
+	return strings.Join(names, ", ")
 }

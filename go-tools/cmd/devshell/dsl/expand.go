@@ -1,12 +1,10 @@
 package dsl
 
-import (
-	"fmt"
-)
+import "fmt"
 
-func ExpandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
+// expandRoot wraps the top-level node list in an implicit root Container.
+func expandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
 	root := &Container{NodeName: "root"}
-
 	for _, n := range nodes {
 		path := n.Name
 		if path == "" {
@@ -18,17 +16,19 @@ func ExpandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
 		}
 		root.Children = append(root.Children, node)
 	}
-
 	return root, nil
 }
 
+// expandNode recursively expands a single raw node into its runtime form.
+//
+// stack tracks the chain of type names currently being expanded for cycle detection.
+// path is the dot-separated node address used in error messages.
 func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, error) {
-
 	if r.Name == "" {
 		return nil, fmt.Errorf("phase=expand path=%s: %w", path, ErrInvalidNode)
 	}
 
-	// Detect cycle
+	// Detect cycles before descending into any uses.
 	for _, t := range r.Uses {
 		for _, s := range stack {
 			if s == t {
@@ -37,66 +37,56 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 		}
 	}
 
-	// Runnable leaf
+	// Runnable leaf.
 	if r.Command != nil {
-		if len(r.Children) > 0 || len(r.Uses) > 0 {
-			return nil, fmt.Errorf("phase=expand path=%s: %w", path, ErrInvalidNode)
+		var cwd string
+		if r.Cwd != nil {
+			cwd = *r.Cwd
 		}
 		return &Runnable{
 			NodeName: r.Name,
 			Command:  *r.Command,
+			Cwd:      cwd,
+			Env:      r.Env,
 		}, nil
 	}
 
-	// Abstract node: if there is exactly one use, the node can become directly the expanded node.
+	// Single-use abstract node: the node takes the shape of the expanded type directly.
+	// The abstract node's own name overrides the type root name (§4.2).
 	if len(r.Uses) == 1 && len(r.Children) == 0 {
 		t := r.Uses[0]
-		def, ok := reg.Get(t)
+		raw, ok := reg.Get(t)
 		if !ok {
 			return nil, fmt.Errorf("phase=expand path=%s: %w: %s", path, ErrUnknownType, t)
 		}
-
-		newStack := append(stack, t)
-		expanded, err := expandNode(def.Expand, reg, newStack, path)
+		expanded, err := expandNode(raw, reg, withType(stack, t), path)
 		if err != nil {
 			return nil, err
 		}
-		// Adopt the expanded node, but keep the abstract node name.
-		switch n := expanded.(type) {
-		case *Runnable:
-			n.NodeName = r.Name
-		case *Container:
-			n.NodeName = r.Name
-		}
+		// Adopt the abstract node's name onto the expanded node.
+		setNodeName(expanded, r.Name)
 		return expanded, nil
 	}
 
-	container := &Container{
-		NodeName: r.Name,
-	}
+	// Container: collects children from uses (in order) then explicit children.
+	container := &Container{NodeName: r.Name}
 
-	// Expand types
 	for _, t := range r.Uses {
-
-		def, ok := reg.Get(t)
+		raw, ok := reg.Get(t)
 		if !ok {
 			return nil, fmt.Errorf("phase=expand path=%s: %w: %s", path, ErrUnknownType, t)
 		}
-
-		newStack := append(stack, t)
-		childPath := joinPath(path, def.Expand.Name)
-		if def.Expand.Name == "" {
+		childPath := joinPath(path, raw.Name)
+		if raw.Name == "" {
 			childPath = joinPath(path, "<type>")
 		}
-		child, err := expandNode(def.Expand, reg, newStack, childPath)
+		child, err := expandNode(raw, reg, withType(stack, t), childPath)
 		if err != nil {
 			return nil, err
 		}
-
 		container.Children = append(container.Children, child)
 	}
 
-	// Expand explicit children
 	for _, c := range r.Children {
 		childPath := joinPath(path, c.Name)
 		if c.Name == "" {
@@ -109,7 +99,7 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 		container.Children = append(container.Children, child)
 	}
 
-	// Collision detection
+	// Reject duplicate sibling names produced by expansion.
 	seen := map[string]struct{}{}
 	for _, child := range container.Children {
 		if _, exists := seen[child.Name()]; exists {
@@ -119,4 +109,30 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 	}
 
 	return container, nil
+}
+
+// withType returns a new stack with t appended, without mutating the original slice.
+func withType(stack []string, t string) []string {
+	return append(append([]string(nil), stack...), t)
+}
+
+// setNodeName sets the name on any Node (Runnable or Container).
+func setNodeName(n Node, name string) {
+	switch node := n.(type) {
+	case *Runnable:
+		node.NodeName = name
+	case *Container:
+		node.NodeName = name
+	}
+}
+
+// joinPath builds a dot-separated path string for use in error messages.
+func joinPath(parent, child string) string {
+	if parent == "" {
+		return child
+	}
+	if child == "" {
+		return parent
+	}
+	return parent + "." + child
 }

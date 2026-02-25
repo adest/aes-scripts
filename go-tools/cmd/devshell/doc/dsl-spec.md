@@ -117,11 +117,21 @@ Example:
 ```yaml
 - name: build
   command: go build ./...
+  cwd: ./backend
+  env:
+    GOFLAGS: "-mod=vendor"
 ```
+
+**Optional properties:**
+
+- `cwd`: string (optional) — working directory for command execution
+- `env`: map<string, string> (optional) — environment variables for command execution
 
 **Constraints:**
 
 * MUST define `command`
+* MAY define `cwd` (optional)
+* MAY define `env` (optional)
 * MUST NOT define `children`
 * MUST NOT define `uses`
 * `command` MUST NOT be empty
@@ -200,6 +210,14 @@ Each type:
 * Multiple `uses` are expanded **in order**, and children are appended sequentially
 * Node names must remain **unique among siblings** after expansion
 
+### 4.2 Name Resolution (Abstract Nodes)
+
+When an abstract node is expanded via `uses`, the **node name from the execution tree** (the abstract node's `name`) has priority.
+
+Specifically:
+
+* If a type definition also declares a `name` at its root, and the abstract node declares a `name`, the **abstract node name MUST be used** for the resulting expanded node.
+* The type root `name` MAY still be used for intermediate/internal nodes produced by the type, or when a type is expanded as a child in a multi-type expansion.
 ---
 
 # 5. Name Rules

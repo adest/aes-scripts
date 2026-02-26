@@ -4,28 +4,29 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"go-tools/cmd/devshell/dsl"
-	"go-tools/cmd/devshell/dslyaml"
 
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	var yamlPath string
+	var flagFiles []string
+	var flagRegistryDirs []string
 
 	rootCmd := &cobra.Command{
-		Use:               "devshell [command ...]",
-		Short:             "Dynamic devshell CLI",
-		Long:              "Dynamic devshell CLI\n\nTasks are auto-completable via shell completion (Tab).",
-		ValidArgsFunction: dynamicCompletion,
+		Use:               appName + " [command ...]",
+		Short:             "Dynamic " + appName + " CLI",
+		Long:              "Dynamic " + appName + " CLI\n\nTasks are auto-completable via shell completion (Tab).",
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			return dynamicCompletion(flagFiles, flagRegistryDirs, args, toComplete)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			root, err := loadDsl(yamlPath)
+			root, err := load(flagFiles, flagRegistryDirs)
 			if err != nil {
 				return err
 			}
@@ -37,32 +38,44 @@ func main() {
 		},
 	}
 
-	rootCmd.Flags().StringVarP(&yamlPath, "file", "f", "", "YAML config file (default: ~/.devshell/devshell.config.yml)")
+	rootCmd.Flags().StringArrayVarP(&flagFiles, "file", "f", nil,
+		"node YAML file (repeatable; default: ~/.config/"+appName+"/nodes/*.yml)")
+	rootCmd.Flags().StringArrayVar(&flagRegistryDirs, "registry-dir", nil,
+		"additional registry directory to scan for type files (repeatable)")
+
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
 
 	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err.Error())
+		if isFlagInterceptError(err) {
+			fmt.Fprintln(os.Stderr, "\nhint: flags after the command path are intercepted by "+appName+"; use -- to pass them through:")
+			fmt.Fprintln(os.Stderr, "  "+appName+" [path] -- <flags>")
+			fmt.Fprintln(os.Stderr, "  example: "+appName+" gene infra down -- -v")
+		}
 		os.Exit(1)
 	}
 }
 
-// loadDsl reads and builds the DSL model from the given path,
-// defaulting to ~/.devshell/devshell.config.yml.
-func loadDsl(path string) (*dsl.Container, error) {
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("could not determine home directory: %w", err)
-		}
-		path = filepath.Join(home, ".devshell", "devshell.config.yml")
-	}
-	data, err := os.ReadFile(path)
+// isFlagInterceptError reports whether the error is cobra intercepting a flag
+// that was meant for the underlying command.
+func isFlagInterceptError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unknown flag:") || strings.Contains(msg, "unknown shorthand flag:")
+}
+
+// load resolves config from flags and builds the runtime tree.
+func load(flagFiles, flagRegistryDirs []string) (*dsl.Container, error) {
+	configDir, err := resolveConfigDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+		return nil, err
 	}
-	root, err := dslyaml.Build(data)
+	registryDirs := resolveRegistryDirs(configDir, flagRegistryDirs)
+	nodeFiles, err := resolveNodeFiles(configDir, flagFiles)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build DSL model: %w", err)
+		return nil, err
 	}
-	return root, nil
+	return loadSources(registryDirs, nodeFiles)
 }
 
 // resolvePath walks args greedily to find the target Runnable.
@@ -121,8 +134,8 @@ func execute(r *dsl.Runnable, extraArgs []string) error {
 }
 
 // dynamicCompletion provides shell completion for devshell commands.
-func dynamicCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	root, err := loadDsl(cmd.Flag("file").Value.String())
+func dynamicCompletion(flagFiles, flagRegistryDirs, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	root, err := load(flagFiles, flagRegistryDirs)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}

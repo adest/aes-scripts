@@ -1,6 +1,6 @@
 # Execution DSL Specification
 
-Version 1.1 (Draft)
+Version 1.2 (Draft)
 
 ---
 
@@ -99,6 +99,7 @@ Each node MUST define **exactly one** of the following properties:
 * `command`
 * `children`
 * `uses`
+* `steps`
 
 This is a strict **XOR rule**.
 
@@ -275,7 +276,155 @@ Example (per-type params, for multi-type with distinct param sets):
 
 * Runnable
 * Container
+* Pipeline
 * Container with intermediate nodes
+
+---
+
+## 3.4 Pipeline Node
+
+A **pipeline node** defines an ordered sequence of steps executed synchronously, in declaration order.
+
+Example:
+
+```yaml
+- name: deploy
+  steps:
+    - command: docker compose pull
+    - command: docker compose up -d
+```
+
+**Properties:**
+
+| Key | Required | Type | Description |
+|-----|----------|------|-------------|
+| `steps` | yes | sequence of steps | Ordered list of steps to execute |
+
+**Constraints:**
+
+* MUST define `steps`
+* MUST NOT define `command`, `children`, or `uses`
+* `steps` MUST NOT be empty (at least one step required)
+
+Pipeline nodes are **executable** (selectable by path), not grouping nodes. Execution is **fail-fast by default**: if a step fails, the pipeline stops immediately unless that step declares `on-fail: continue` or `on-fail: { action: retry, ... }`.
+
+---
+
+### 3.4.1 Step Structure
+
+Each step in a pipeline defines a command and its execution context.
+
+**Properties:**
+
+| Key | Required | Type | Description |
+|-----|----------|------|-------------|
+| `command` | yes | string or sequence of strings | Same forms as a runnable node |
+| `args` | no | sequence of strings | Same semantics as a runnable node |
+| `id` | no | string | Unique identifier for this step within the pipeline |
+| `cwd` | no | string | Working directory |
+| `env` | no | map<string, string> | Environment variables |
+| `capture` | no | `stdout` \| `stderr` \| `both` | Streams to buffer in memory |
+| `tee` | no | boolean | If `true`, captured streams are also forwarded to the terminal (default: `false`) |
+| `stdin` | no | step-ref | Stdin source. Format: `steps.<id>.stdout` or `steps.<id>.stderr` |
+| `on-fail` | no | string or mapping | Failure behavior (see below). Default: `fail` |
+
+**Step constraints:**
+
+* MUST have a non-empty `command` (same emptiness rules as runnable: empty string, empty array, and empty first token are all forbidden)
+* If `command` is an **array** → `args` MUST NOT be present
+* If `command` is a **string** and `args` is present → `command` MUST be a single token (no whitespace)
+* `id` MUST be unique within the step list (case-sensitive)
+* `id` MUST NOT be empty if declared
+* `id` MUST be a static identifier — `{{ }}` expressions are forbidden inside `id` values
+* `capture` MUST be one of: `stdout`, `stderr`, `both`
+* `capture` requires `id` — a step without `id` MUST NOT declare `capture` (the buffered output would be unreachable)
+* `tee: true` requires `capture` — declaring `tee` without `capture` is an error
+* `stdin` MUST reference a step that: (1) exists in the same step list, (2) appears before the current step, (3) has a `capture` that includes the referenced stream
+
+---
+
+### 3.4.2 `on-fail` Field
+
+Controls the behavior when a step exits with a non-zero code.
+
+**String shorthand** (for `fail` and `continue`):
+
+```yaml
+steps:
+  - command: docker compose down
+    on-fail: continue       # swallow failure, proceed to next step
+
+  - command: docker compose up -d
+    # on-fail: fail         # implicit default
+```
+
+**Structured form** (required for `retry`):
+
+```yaml
+steps:
+  - command: curl https://api.example.com/health
+    on-fail:
+      action: retry
+      attempts: 3           # total attempts including the first (minimum: 2)
+      delay: 2s             # wait between attempts (optional, default: 0s)
+```
+
+**`on-fail` constraints:**
+
+* String form: value MUST be `fail` or `continue`
+* Structured form: `action` MUST be `retry`; string shorthand MUST NOT be used for `retry`
+* `attempts` MUST be an integer ≥ 2
+* `delay` is a duration string in Go format (`1s`, `500ms`, `1m30s`); defaults to `0s` if absent
+* If all retry attempts are exhausted, the step is considered failed; the pipeline stops (fail-fast applies normally at that point)
+
+**Semantics of `on-fail: continue`:**
+
+* The step's non-zero exit code is recorded but does not stop execution
+* The pipeline continues to the next step
+* If all remaining steps succeed (or also declare `on-fail: continue`), the pipeline exits with code 0
+* A step with `on-fail: continue` that also has `capture` will have its captured output set to whatever was produced before the failure
+
+---
+
+## 3.5 Step Output Substitution
+
+Step output references allow a step to inject the buffered output of a preceding step into its `command`, `args`, `env`, or `cwd`.
+
+**Syntax:** `{{ steps.<id>.<stream> }}`
+
+Where:
+* `<id>` is the `id` of a step defined **before** the current step in the same pipeline
+* `<stream>` is `stdout` or `stderr`
+
+**Valid substitution locations:**
+
+| Field | Valid | Notes |
+|-------|-------|-------|
+| `args` (string values) | yes | Each element is an arg atom — no splitting occurs, even if the output contains spaces |
+| `command` (array form, per element) | yes | Each element is an arg atom — no splitting occurs |
+| `command` (string form) | **no** | Forbidden: substitution happens before argv splitting; spaces in captured output would produce incorrect token boundaries |
+| `env` (values) | yes | Applied per value, no splitting |
+| `cwd` | yes | Applied to the full string, no splitting |
+| `id` | **no** | Static identifier — substitution forbidden |
+| `capture` | **no** | Enum value — substitution forbidden |
+| `stdin` | **no** | Already a step-ref, not a string |
+
+**Substitution rules:**
+
+* The referenced step MUST exist before the current step in declaration order
+* The referenced step MUST have `capture` set to include the referenced stream
+* The captured output is trimmed of **trailing newlines only** before substitution — no other transformation is applied
+* Multiple substitutions within a single string are resolved left to right
+* Substitution is performed at **execution time**, after the referenced step completes
+
+**Distinction from type parameter substitution:**
+
+| Syntax | Resolved at | Scope | Leading character |
+|--------|-------------|-------|-------------------|
+| `{{ .param }}` | Expansion (Phase 2) | Type bodies | Leading dot (`.`) |
+| `{{ steps.id.stream }}` | Execution | Pipeline steps | `steps.` prefix, no leading dot |
+
+These syntaxes are distinguishable by the presence or absence of the leading dot. When a type body contains a pipeline step with step output references, those references are **preserved as literals** during Phase 2 template expansion and resolved at execution time.
 
 ---
 
@@ -421,7 +570,7 @@ Validates syntax and structure **before expansion**.
 Rules:
 
 * `name` is required
-* Exactly one of `command`, `children`, or `uses` must be defined
+* Exactly one of `command`, `children`, `uses`, or `steps` must be defined
 * Children are recursively validated
 * Sibling names must be unique
 * `uses` is only allowed on abstract nodes
@@ -432,7 +581,26 @@ Rules:
 * `command` MUST NOT be empty (empty string, empty array, or empty first token)
 * If `command` is an **array** → `args` MUST NOT be present
 * If `command` is a **string** and `args` is present → `command` MUST be a single token (no whitespace)
-* `args` is only valid on runnable nodes (requires `command`)
+* `args` is only valid on runnable nodes or steps (requires `command`)
+
+**Additional rules for pipeline nodes (`steps`):**
+
+* `steps` MUST NOT be empty
+* Each step MUST have a non-empty `command` (same emptiness rules as runnable)
+* If a step `command` is an **array** → `args` MUST NOT be present on that step
+* If a step `command` is a **string** and `args` is present → `command` MUST be a single token
+* Step `id` values MUST be unique within the step list (case-sensitive)
+* Step `id` MUST NOT be empty if declared
+* Step `id` MUST be a static identifier — `{{ }}` expressions are forbidden in `id` values
+* `capture` MUST be one of: `stdout`, `stderr`, `both`
+* `capture` requires `id` — declaring `capture` without `id` is an error
+* `tee: true` requires `capture` — declaring `tee` without `capture` is an error
+* `stdin` MUST match the format `steps.<id>.<stream>` where `<stream>` is `stdout` or `stderr`
+* `stdin` reference: the referenced step MUST exist earlier in the list AND have a `capture` that includes the referenced stream
+* Step output references (`{{ steps.<id>.<stream> }}`) are valid in `args` elements, `command` array form elements, `env` values, and `cwd` — and are **forbidden in `command` string form**
+* For valid step output references: the referenced step MUST exist earlier in the list AND have a `capture` that includes the referenced stream
+* `on-fail` string form: value MUST be `fail` or `continue`
+* `on-fail` structured form: `action` MUST be `retry`; `attempts` MUST be an integer ≥ 2; `delay` if present MUST be a valid duration string
 
 ---
 
@@ -446,6 +614,7 @@ Rules:
   * String form: template applied to the full string **before** argv splitting
   * Array form: template applied to **each element** independently
   * Long form: template applied to the `command` token and to **each element** of `args` independently
+* Step output references (`{{ steps.<id>.<stream> }}`) are **preserved as literals** during Phase 2 template expansion — they are not resolved by the Go template engine and remain intact for execution-time resolution
 * Name uniqueness is checked after substitution
 * All `uses` are expanded using the type registry
 * Expansion is recursive until no abstract nodes remain
@@ -462,18 +631,40 @@ After expansion, nodes must satisfy:
 
   * `command`
   * `children`
+  * `steps`
 * Containers must have **at least one child**
 * Runnables must have **non-empty command**
+* Pipelines must have **at least one step** with a non-empty argv
 * No duplicate names among siblings
 
 ---
 
 # 8. Execution Model
 
-* The application **selects a runnable node** by path and executes its command
+* The application **selects a runnable or pipeline node** by path and executes it
 * Containers are **not executable**
-* Path example: `backend.build`
+* Path example: `backend.build`, `deploy`, `login`
 * Execution is outside the DSL engine responsibility
+
+## 8.1 Runnable Execution
+
+The command argv is executed directly (no implicit shell). `cwd` and `env` are applied if set.
+
+## 8.2 Pipeline Execution
+
+Steps are executed **synchronously, in declaration order**. For each step:
+
+1. Resolve all step output references (`{{ steps.<id>.<stream> }}`) in `command`, `args`, `env`, and `cwd` — using the buffered output of the referenced step, trimmed of trailing newlines
+2. Connect `stdin` if specified — the buffered output of the referenced step is fed to the process stdin
+3. Execute the command directly (no implicit shell)
+4. Buffer the output streams declared in `capture`; if `tee: true`, also forward them to the terminal
+5. Streams not declared in `capture` are forwarded to the terminal as usual
+6. Evaluate the exit code against `on-fail`:
+   * `fail` (default): non-zero exit → stop pipeline, report failure
+   * `continue`: non-zero exit → record failure silently, proceed to next step
+   * `retry`: re-execute the step up to `attempts` times total, waiting `delay` between each attempt; if all attempts fail → fail-fast
+
+**Pipeline exit code:** the pipeline succeeds (exit code 0) if and only if every step either succeeded or declared `on-fail: continue`. The first step that fails without `on-fail: continue` (including a retry that exhausted its attempts) determines the pipeline failure.
 
 ---
 
@@ -657,6 +848,143 @@ nodes:
       k8s-namespace: production
 ```
 
+### Pipeline Node — sequential steps
+
+```yaml
+- name: deploy
+  steps:
+    - command: docker compose pull
+    - command: docker compose up -d
+```
+
+### Pipeline Node — capture and inject into args
+
+```yaml
+- name: login
+  steps:
+    - id: bw
+      command: bw get password my-registry
+      capture: stdout
+
+    - command: docker
+      args:
+        - login
+        - registry.example.com
+        - --username
+        - user
+        - --password
+        - "{{ steps.bw.stdout }}"
+```
+
+### Pipeline Node — explicit pipe via stdin
+
+```yaml
+- name: find-go-files
+  steps:
+    - id: list
+      command: ls
+      capture: stdout
+
+    - command: grep
+      args:
+        - ".go"
+      stdin: steps.list.stdout
+```
+
+### Pipeline Node — tee (capture + display)
+
+```yaml
+- name: build-and-deploy
+  steps:
+    - id: version
+      command: git describe --tags
+      capture: stdout
+      tee: true             # also printed to terminal
+
+    - command: docker build
+      args:
+        - --tag
+        - "myapp:{{ steps.version.stdout }}"
+        - .
+```
+
+### Pipeline Node — on-fail: continue
+
+```yaml
+- name: restart
+  steps:
+    - command: docker compose down
+      on-fail: continue     # may fail if nothing is running; that's fine
+
+    - command: docker compose up -d
+```
+
+### Pipeline Node — on-fail: retry
+
+```yaml
+- name: wait-for-api
+  steps:
+    - command: curl
+      args:
+        - --fail
+        - --silent
+        - https://api.example.com/health
+      on-fail:
+        action: retry
+        attempts: 5
+        delay: 3s
+
+    - command: run-migrations
+```
+
+### Pipeline Node — step output in cwd and env
+
+```yaml
+- name: build-in-workspace
+  steps:
+    - id: find-root
+      command: find-project-root
+      capture: stdout
+
+    - command: make
+      args: [build]
+      cwd: "{{ steps.find-root.stdout }}"
+      env:
+        BUILD_DIR: "{{ steps.find-root.stdout }}/dist"
+```
+
+### Pipeline type with params
+
+```yaml
+types:
+  docker-login:
+    params:
+      registry: ~
+      username: ~
+    steps:
+      - id: token
+        command: get-token
+        args:
+          - "{{ .registry }}"
+        capture: stdout
+
+      - command: docker
+        args:
+          - login
+          - "{{ .registry }}"
+          - --username
+          - "{{ .username }}"
+          - --password
+          - "{{ steps.token.stdout }}"
+
+nodes:
+  - name: login
+    uses: docker-login
+    with:
+      registry: registry.example.com
+      username: ci-bot
+```
+
 ### Multi-level Example
 
 ```yaml
@@ -681,6 +1009,9 @@ Potential features:
 * Linting support
 * IDE tooling support
 * Documentation generation from type registry
+* `on-fail: { action: retry, ..., then: continue }` — fallback to continue after retry exhaustion
+* `timeout` per step — kill a step after a duration, counts as failure
+* `capture: both` with independent access to `steps.id.stdout` and `steps.id.stderr`
 
 ---
 

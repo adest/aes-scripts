@@ -42,7 +42,7 @@ type yamlTypeDef struct {
 	Params map[string]interface{} `yaml:"params,omitempty"`
 
 	// Node body fields — same as yamlRawNode.
-	Name string            `yaml:"name"`
+	Name string `yaml:"name"`
 	// Command uses yaml.Node for polymorphic decoding (string or sequence).
 	// An absent `command` key is detected by checking Command.Kind == 0.
 	Command  yaml.Node         `yaml:"command,omitempty"`
@@ -57,7 +57,8 @@ type yamlTypeDef struct {
 	// *yaml.Node fields correctly when decoding into a struct — the Kind ends
 	// up as 0. A non-pointer yaml.Node is decoded correctly.
 	// An absent `with` key is detected by checking With.Kind == 0.
-	With yaml.Node `yaml:"with,omitempty"`
+	With  yaml.Node   `yaml:"with,omitempty"`
+	Steps []yamlStep  `yaml:"steps,omitempty"`
 }
 
 // yamlRawNode is the YAML representation of a node.
@@ -74,8 +75,26 @@ type yamlRawNode struct {
 	Children []yamlRawNode     `yaml:"children,omitempty"`
 	// Uses uses yaml.Node for polymorphic decoding (string or sequence).
 	// An absent `uses` key is detected by checking Uses.Kind == 0.
-	Uses yaml.Node `yaml:"uses,omitempty"`
-	With yaml.Node `yaml:"with,omitempty"`
+	Uses  yaml.Node  `yaml:"uses,omitempty"`
+	With  yaml.Node  `yaml:"with,omitempty"`
+	Steps []yamlStep `yaml:"steps,omitempty"`
+}
+
+// yamlStep is the YAML representation of a single pipeline step.
+//
+// `command` uses yaml.Node for polymorphic decoding (string or sequence).
+// `on-fail` uses yaml.Node because it accepts either a string shorthand
+// ("continue") or a mapping ({ action: retry, attempts: 3, delay: 2s }).
+type yamlStep struct {
+	ID      string            `yaml:"id,omitempty"`
+	Command yaml.Node         `yaml:"command,omitempty"`
+	Args    []string          `yaml:"args,omitempty"`
+	Cwd     *string           `yaml:"cwd,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty"`
+	Capture string            `yaml:"capture,omitempty"`
+	Tee     bool              `yaml:"tee,omitempty"`
+	Stdin   string            `yaml:"stdin,omitempty"`
+	OnFail  yaml.Node         `yaml:"on-fail,omitempty"`
 }
 
 // ---- Parse -----------------------------------------------------------------
@@ -164,6 +183,7 @@ func convertTypeDef(ytd yamlTypeDef) (dsl.TypeDef, error) {
 		Children: ytd.Children,
 		Uses:     ytd.Uses,
 		With:     ytd.With,
+		Steps:    ytd.Steps,
 	})
 	if err != nil {
 		return dsl.TypeDef{}, err
@@ -322,7 +342,104 @@ func convertNode(yn yamlRawNode) (dsl.RawNode, error) {
 		r.With = &wb
 	}
 
+	// --- steps ---
+	// Preserve an explicit empty steps slice so downstream validation can
+	// distinguish "steps key absent" (nil) from "steps key present but empty"
+	// (non-nil empty slice, which will fail validation: at least one step required).
+	if yn.Steps != nil {
+		r.Steps = make([]dsl.RawStep, 0, len(yn.Steps))
+		for i, ys := range yn.Steps {
+			step, err := convertStep(ys)
+			if err != nil {
+				return dsl.RawNode{}, fmt.Errorf("steps[%d]: %w", i, err)
+			}
+			r.Steps = append(r.Steps, step)
+		}
+	}
+
 	return r, nil
+}
+
+// convertStep converts a single yamlStep to dsl.RawStep.
+func convertStep(ys yamlStep) (dsl.RawStep, error) {
+	s := dsl.RawStep{
+		ID:    ys.ID,
+		Cwd:   ys.Cwd,
+		Env:   ys.Env,
+		Tee:   ys.Tee,
+		Stdin: ys.Stdin,
+	}
+
+	// --- command ---
+	// Same three-form logic as convertNode, delegated to convertCommandNode.
+	if ys.Command.Kind != 0 {
+		cmd, argv, err := convertCommandNode(&ys.Command, ys.Args)
+		if err != nil {
+			return dsl.RawStep{}, fmt.Errorf("command: %w", err)
+		}
+		s.Command = cmd
+		s.Argv = argv
+	} else if len(ys.Args) > 0 {
+		return dsl.RawStep{}, fmt.Errorf("args requires command")
+	}
+
+	// --- capture ---
+	switch ys.Capture {
+	case "":
+		s.Capture = dsl.CaptureNone
+	case "stdout":
+		s.Capture = dsl.CaptureStdout
+	case "stderr":
+		s.Capture = dsl.CaptureStderr
+	case "both":
+		s.Capture = dsl.CaptureBoth
+	default:
+		return dsl.RawStep{}, fmt.Errorf("capture must be 'stdout', 'stderr', or 'both' (got %q)", ys.Capture)
+	}
+
+	// --- on-fail ---
+	// Absent (Kind == 0) means default fail-fast behaviour; zero OnFail handles that.
+	if ys.OnFail.Kind != 0 {
+		of, err := convertOnFail(&ys.OnFail)
+		if err != nil {
+			return dsl.RawStep{}, fmt.Errorf("on-fail: %w", err)
+		}
+		s.OnFail = of
+	}
+
+	return s, nil
+}
+
+// convertOnFail converts the polymorphic `on-fail` YAML node to dsl.OnFail.
+//
+// Two forms are accepted:
+//   - String: "fail" or "continue"
+//   - Mapping: { action: retry, attempts: N, delay: Xs }
+func convertOnFail(node *yaml.Node) (dsl.OnFail, error) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		// String shorthand: "fail" or "continue".
+		return dsl.OnFail{Action: node.Value}, nil
+
+	case yaml.MappingNode:
+		// Structured form: decode into a temporary struct.
+		var m struct {
+			Action   string `yaml:"action"`
+			Attempts int    `yaml:"attempts"`
+			Delay    string `yaml:"delay"`
+		}
+		if err := node.Decode(&m); err != nil {
+			return dsl.OnFail{}, fmt.Errorf("expected mapping with action/attempts/delay: %w", err)
+		}
+		return dsl.OnFail{
+			Action:   m.Action,
+			Attempts: m.Attempts,
+			Delay:    m.Delay,
+		}, nil
+
+	default:
+		return dsl.OnFail{}, fmt.Errorf("expected string or mapping, got YAML kind %d", node.Kind)
+	}
 }
 
 // convertCommandNode normalises the three YAML command forms.

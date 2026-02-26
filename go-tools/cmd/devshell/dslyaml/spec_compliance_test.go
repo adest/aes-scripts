@@ -89,6 +89,23 @@ func requireContainer(t *testing.T, node dsl.Node, wantName string, wantChildCou
 	return c
 }
 
+// requirePipeline asserts that node is a *dsl.Pipeline with the expected name
+// and number of steps, and returns it for further inspection.
+func requirePipeline(t *testing.T, node dsl.Node, wantName string, wantStepCount int) *dsl.Pipeline {
+	t.Helper()
+	p, ok := node.(*dsl.Pipeline)
+	if !ok {
+		t.Fatalf("expected *dsl.Pipeline, got %T", node)
+	}
+	if p.Name() != wantName {
+		t.Errorf("pipeline name: want %q, got %q", wantName, p.Name())
+	}
+	if len(p.Steps) != wantStepCount {
+		t.Errorf("pipeline %q step count: want %d, got %d", wantName, wantStepCount, len(p.Steps))
+	}
+	return p
+}
+
 // snapshotTree produces a deterministic string representation of the runtime tree.
 func snapshotTree(n dsl.Node) string {
 	var b strings.Builder
@@ -102,6 +119,8 @@ func snapshotTree(n dsl.Node) string {
 			for _, c := range x.Children {
 				walk(c, path+"."+c.Name())
 			}
+		case *dsl.Pipeline:
+			fmt.Fprintf(&b, "P %s steps=%d\n", path, len(x.Steps))
 		}
 	}
 	walk(n, n.Name())
@@ -2386,6 +2405,567 @@ func TestModel_ContainerFind(t *testing.T) {
 		_, ok := app.Find("build")
 		if ok {
 			t.Fatal("Find must not search recursively")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §3.4 — Pipeline Node
+// ---------------------------------------------------------------------------
+
+func TestBuild_Section3_4_PipelineNode(t *testing.T) {
+
+	// --- §3.4: basic structure ---
+
+	t.Run("sequential steps: pipeline node builds correctly", func(t *testing.T) {
+		yml := `
+- name: deploy
+  steps:
+    - command: docker compose pull
+    - command: docker compose up -d
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "deploy", 2)
+		if strings.Join(p.Steps[0].Argv, " ") != "docker compose pull" {
+			t.Errorf("step[0] argv: want %q, got %q", "docker compose pull", strings.Join(p.Steps[0].Argv, " "))
+		}
+		if strings.Join(p.Steps[1].Argv, " ") != "docker compose up -d" {
+			t.Errorf("step[1] argv: want %q, got %q", "docker compose up -d", strings.Join(p.Steps[1].Argv, " "))
+		}
+	})
+
+	t.Run("pipeline node is selectable (AsPipeline works)", func(t *testing.T) {
+		yml := `
+- name: deploy
+  steps:
+    - command: echo hello
+`
+		root := requireBuildOK(t, yml)
+		p, ok := dsl.AsPipeline(root.Children[0])
+		if !ok {
+			t.Fatal("expected AsPipeline to succeed")
+		}
+		if p.Name() != "deploy" {
+			t.Errorf("name: want 'deploy', got %q", p.Name())
+		}
+	})
+
+	t.Run("pipeline coexists with runnables and containers in the same tree", func(t *testing.T) {
+		yml := `
+- name: build
+  command: go build ./...
+- name: deploy
+  steps:
+    - command: docker compose pull
+    - command: docker compose up -d
+- name: group
+  children:
+    - name: test
+      command: go test ./...
+`
+		root := requireBuildOK(t, yml)
+		if len(root.Children) != 3 {
+			t.Fatalf("expected 3 children, got %d", len(root.Children))
+		}
+		requireRunnable(t, root.Children[0], "build", "go build ./...")
+		requirePipeline(t, root.Children[1], "deploy", 2)
+		requireContainer(t, root.Children[2], "group", 1)
+	})
+
+	t.Run("XOR rule: steps + command → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  command: echo hi
+  steps:
+    - command: echo world
+`
+		requireBuildErr(t, yml, "phase=raw", "cannot combine")
+	})
+
+	t.Run("XOR rule: steps + children → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  children:
+    - name: child
+      command: echo hi
+  steps:
+    - command: echo world
+`
+		requireBuildErr(t, yml, "phase=raw", "cannot combine")
+	})
+
+	t.Run("empty steps list → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps: []
+`
+		requireBuildErr(t, yml, "phase=raw", "at least one step")
+	})
+
+	t.Run("step with empty command string → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: ""
+`
+		requireBuildErr(t, yml, "phase=raw", "step command must not be empty")
+	})
+
+	// --- §3.4.1: step structure ---
+
+	t.Run("step long form (single token command + args): argv assembled correctly", func(t *testing.T) {
+		yml := `
+- name: login
+  steps:
+    - command: docker
+      args:
+        - login
+        - registry.example.com
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "login", 1)
+		want := "docker login registry.example.com"
+		if got := strings.Join(p.Steps[0].Argv, " "); got != want {
+			t.Errorf("argv: want %q, got %q", want, got)
+		}
+	})
+
+	t.Run("step with cwd and env: preserved in runtime Pipeline", func(t *testing.T) {
+		yml := `
+- name: build
+  steps:
+    - command: make build
+      cwd: ./frontend
+      env:
+        NODE_ENV: production
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "build", 1)
+		if p.Steps[0].Cwd != "./frontend" {
+			t.Errorf("Cwd: want './frontend', got %q", p.Steps[0].Cwd)
+		}
+		if p.Steps[0].Env["NODE_ENV"] != "production" {
+			t.Errorf("NODE_ENV: want 'production', got %q", p.Steps[0].Env["NODE_ENV"])
+		}
+	})
+
+	t.Run("capture stdout: preserved in PipelineStep", func(t *testing.T) {
+		yml := `
+- name: get-token
+  steps:
+    - id: auth
+      command: get-token
+      capture: stdout
+    - command: echo done
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "get-token", 2)
+		if p.Steps[0].Capture != dsl.CaptureStdout {
+			t.Errorf("Capture: want CaptureStdout, got %v", p.Steps[0].Capture)
+		}
+		if p.Steps[0].ID != "auth" {
+			t.Errorf("ID: want 'auth', got %q", p.Steps[0].ID)
+		}
+	})
+
+	t.Run("capture: requires id → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: echo hi
+      capture: stdout
+`
+		requireBuildErr(t, yml, "phase=raw", "capture requires id")
+	})
+
+	t.Run("tee: requires capture → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - id: s
+      command: echo hi
+      tee: true
+`
+		requireBuildErr(t, yml, "phase=raw", "tee requires capture")
+	})
+
+	t.Run("tee: valid when capture is set", func(t *testing.T) {
+		yml := `
+- name: ok
+  steps:
+    - id: s
+      command: echo hi
+      capture: stdout
+      tee: true
+    - command: echo done
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "ok", 2)
+		if !p.Steps[0].Tee {
+			t.Error("Tee: want true")
+		}
+	})
+
+	t.Run("stdin: wires captured output to next step", func(t *testing.T) {
+		yml := `
+- name: find-go-files
+  steps:
+    - id: list
+      command: ls
+      capture: stdout
+    - command: grep
+      args: [".go"]
+      stdin: steps.list.stdout
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "find-go-files", 2)
+		if p.Steps[1].Stdin == nil {
+			t.Fatal("expected Stdin to be set")
+		}
+		if p.Steps[1].Stdin.StepID != "list" {
+			t.Errorf("Stdin.StepID: want 'list', got %q", p.Steps[1].Stdin.StepID)
+		}
+		if p.Steps[1].Stdin.Stream != dsl.CaptureStdout {
+			t.Errorf("Stdin.Stream: want CaptureStdout, got %v", p.Steps[1].Stdin.Stream)
+		}
+	})
+
+	t.Run("stdin: forward reference → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: grep
+      args: [".go"]
+      stdin: steps.list.stdout
+    - id: list
+      command: ls
+      capture: stdout
+`
+		requireBuildErr(t, yml, "phase=raw", "step reference to unknown id")
+	})
+
+	t.Run("stdin: references uncaptured stream → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - id: lister
+      command: ls
+      capture: stderr
+    - command: grep
+      args: [".go"]
+      stdin: steps.lister.stdout
+`
+		requireBuildErr(t, yml, "phase=raw", "uncaptured stream")
+	})
+
+	t.Run("stdin: bad format → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - id: first
+      command: ls
+      capture: stdout
+    - command: grep
+      stdin: not.a.valid.ref
+`
+		requireBuildErr(t, yml, "phase=raw", "invalid step reference format")
+	})
+
+	t.Run("duplicate step ids → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - id: dup
+      command: echo a
+      capture: stdout
+    - id: dup
+      command: echo b
+      capture: stdout
+`
+		requireBuildErr(t, yml, "phase=raw")
+	})
+
+	// --- §3.4.2: on-fail ---
+
+	t.Run("on-fail: continue — preserved in PipelineStep", func(t *testing.T) {
+		yml := `
+- name: restart
+  steps:
+    - command: docker compose down
+      on-fail: continue
+    - command: docker compose up -d
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "restart", 2)
+		if p.Steps[0].OnFail.Action != "continue" {
+			t.Errorf("OnFail.Action: want 'continue', got %q", p.Steps[0].OnFail.Action)
+		}
+		// Second step has no on-fail → zero value (empty action = fail-fast).
+		if p.Steps[1].OnFail.Action != "" {
+			t.Errorf("OnFail.Action[1]: want '' (default), got %q", p.Steps[1].OnFail.Action)
+		}
+	})
+
+	t.Run("on-fail: retry with attempts and delay — preserved in PipelineStep", func(t *testing.T) {
+		yml := `
+- name: wait-for-api
+  steps:
+    - command: curl
+      args: [--fail, --silent, https://api.example.com/health]
+      on-fail:
+        action: retry
+        attempts: 3
+        delay: 2s
+    - command: run-migrations
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "wait-for-api", 2)
+		of := p.Steps[0].OnFail
+		if of.Action != "retry" {
+			t.Errorf("Action: want 'retry', got %q", of.Action)
+		}
+		if of.Attempts != 3 {
+			t.Errorf("Attempts: want 3, got %d", of.Attempts)
+		}
+		if of.Delay != "2s" {
+			t.Errorf("Delay: want '2s', got %q", of.Delay)
+		}
+	})
+
+	t.Run("on-fail: retry with attempts < 2 → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: echo hi
+      on-fail:
+        action: retry
+        attempts: 1
+`
+		requireBuildErr(t, yml, "phase=raw", "attempts must be >= 2")
+	})
+
+	t.Run("on-fail: invalid action string → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: echo hi
+      on-fail: maybe
+`
+		requireBuildErr(t, yml, "phase=raw", "action must be")
+	})
+
+	t.Run("on-fail: invalid delay duration → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: echo hi
+      on-fail:
+        action: retry
+        attempts: 3
+        delay: notaduration
+`
+		requireBuildErr(t, yml, "phase=raw", "delay", "not a valid duration")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §3.5 — Step Output Substitution
+// ---------------------------------------------------------------------------
+
+func TestBuild_Section3_5_StepOutputSubstitution(t *testing.T) {
+
+	t.Run("step ref in args: preserved as literal in runtime argv", func(t *testing.T) {
+		// The ref is not resolved at build time — it remains in argv as a literal
+		// to be resolved by the executor at run time.
+		yml := `
+- name: login
+  steps:
+    - id: bw
+      command: bw get password my-registry
+      capture: stdout
+    - command: docker
+      args:
+        - login
+        - --password
+        - "{{ steps.bw.stdout }}"
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "login", 2)
+		lastArg := p.Steps[1].Argv[len(p.Steps[1].Argv)-1]
+		if lastArg != "{{ steps.bw.stdout }}" {
+			t.Errorf("step ref in argv: want %q, got %q", "{{ steps.bw.stdout }}", lastArg)
+		}
+	})
+
+	t.Run("step ref in env value: preserved as literal", func(t *testing.T) {
+		yml := `
+- name: build
+  steps:
+    - id: version
+      command: git describe --tags
+      capture: stdout
+    - command: ["docker", "build", "."]
+      env:
+        TAG: "{{ steps.version.stdout }}"
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "build", 2)
+		if p.Steps[1].Env["TAG"] != "{{ steps.version.stdout }}" {
+			t.Errorf("env TAG: want ref literal, got %q", p.Steps[1].Env["TAG"])
+		}
+	})
+
+	t.Run("step ref in cwd: preserved as literal", func(t *testing.T) {
+		yml := `
+- name: work
+  steps:
+    - id: find-root
+      command: find-project-root
+      capture: stdout
+    - command: make
+      args: [build]
+      cwd: "{{ steps.find-root.stdout }}"
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "work", 2)
+		if p.Steps[1].Cwd != "{{ steps.find-root.stdout }}" {
+			t.Errorf("cwd: want ref literal, got %q", p.Steps[1].Cwd)
+		}
+	})
+
+	t.Run("step ref: forward reference → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: docker
+      args:
+        - login
+        - --password
+        - "{{ steps.bw.stdout }}"
+    - id: bw
+      command: bw get password
+      capture: stdout
+`
+		requireBuildErr(t, yml, "phase=raw", "step reference to unknown id")
+	})
+
+	t.Run("step ref: referenced step has no capture → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - id: lister
+      command: ls
+    - command: grep
+      args:
+        - "{{ steps.lister.stdout }}"
+`
+		requireBuildErr(t, yml, "phase=raw", "uncaptured stream")
+	})
+
+	t.Run("step ref: unknown step id in args → raw error", func(t *testing.T) {
+		yml := `
+- name: bad
+  steps:
+    - command: echo
+      args:
+        - "{{ steps.nobody.stdout }}"
+`
+		requireBuildErr(t, yml, "phase=raw", "step reference to unknown id")
+	})
+
+	// §3.5: step refs inside a type body are preserved through Phase 2 expansion.
+	t.Run("step ref inside type body: preserved as literal after type expansion", func(t *testing.T) {
+		yml := `
+types:
+  docker-login:
+    params:
+      registry: ~
+      username: ~
+    steps:
+      - id: token
+        command: get-token
+        args:
+          - "{{ .registry }}"
+        capture: stdout
+      - command: docker
+        args:
+          - login
+          - "{{ .registry }}"
+          - --username
+          - "{{ .username }}"
+          - --password
+          - "{{ steps.token.stdout }}"
+
+nodes:
+  - name: login
+    uses: docker-login
+    with:
+      registry: registry.example.com
+      username: ci-bot
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "login", 2)
+
+		// Step 0: type param {{ .registry }} must be substituted.
+		if p.Steps[0].Argv[0] != "get-token" {
+			t.Errorf("step[0] cmd: want 'get-token', got %q", p.Steps[0].Argv[0])
+		}
+		if p.Steps[0].Argv[1] != "registry.example.com" {
+			t.Errorf("step[0] registry arg: want 'registry.example.com', got %q", p.Steps[0].Argv[1])
+		}
+
+		// Step 1: type param {{ .registry }} and {{ .username }} must be substituted;
+		// step ref {{ steps.token.stdout }} must be preserved as a literal.
+		// Argv = ["docker", "login", registry, "--username", username, "--password", step-ref]
+		step1 := p.Steps[1]
+		registryArg := step1.Argv[2] // docker login <registry> ...
+		if registryArg != "registry.example.com" {
+			t.Errorf("step[1] registry arg: want 'registry.example.com', got %q", registryArg)
+		}
+		usernameArg := step1.Argv[4] // --username <username>
+		if usernameArg != "ci-bot" {
+			t.Errorf("step[1] username arg: want 'ci-bot', got %q", usernameArg)
+		}
+		passwordArg := step1.Argv[6] // --password <step-ref>
+		if passwordArg != "{{ steps.token.stdout }}" {
+			t.Errorf("step[1] password arg: want step ref literal, got %q", passwordArg)
+		}
+	})
+
+	t.Run("capture: both — CaptureMode set correctly", func(t *testing.T) {
+		yml := `
+- name: noisy
+  steps:
+    - id: cmd
+      command: build-tool
+      capture: both
+    - command: echo done
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "noisy", 2)
+		if p.Steps[0].Capture != dsl.CaptureBoth {
+			t.Errorf("Capture: want CaptureBoth, got %v", p.Steps[0].Capture)
+		}
+	})
+
+	t.Run("stdin referencing stderr: wired correctly", func(t *testing.T) {
+		yml := `
+- name: debug
+  steps:
+    - id: run
+      command: noisy-cmd
+      capture: stderr
+    - command: grep
+      args: [ERROR]
+      stdin: steps.run.stderr
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "debug", 2)
+		if p.Steps[1].Stdin == nil {
+			t.Fatal("expected Stdin to be set")
+		}
+		if p.Steps[1].Stdin.Stream != dsl.CaptureStderr {
+			t.Errorf("Stdin.Stream: want CaptureStderr, got %v", p.Steps[1].Stdin.Stream)
 		}
 	})
 }

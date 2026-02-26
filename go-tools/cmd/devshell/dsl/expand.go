@@ -24,12 +24,13 @@ func expandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
 
 // expandNode recursively expands a single raw node into its runtime form.
 //
-// The expansion logic handles three cases:
-//  1. Runnable: a node with a `command` — returned as-is.
-//  2. Single-use abstract: a node with exactly one entry in `uses` and no
+// The expansion logic handles four cases:
+//  1. Runnable: a node with a `command` — converted directly.
+//  2. Pipeline: a node with `steps` — converted directly (no type expansion).
+//  3. Single-use abstract: a node with exactly one entry in `uses` and no
 //     explicit children. The type is expanded and the abstract node's name
 //     overrides the type root name (§5.2).
-//  3. Container: explicit `children`, or multiple entries in `uses`, or both.
+//  4. Container: explicit `children`, or multiple entries in `uses`, or both.
 //     Uses are expanded first (in order), then explicit children are appended.
 //
 // stack tracks type names currently being expanded for cycle detection.
@@ -59,6 +60,15 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 				)
 			}
 		}
+	}
+
+	// --- Pipeline leaf ---
+	// A node with steps is an executable pipeline. It does not recurse into
+	// type expansion — steps are always concrete commands. Step references
+	// ({{ steps.X.Y }}) embedded in argv/env/cwd are left as-is for the
+	// executor to resolve at run time.
+	if r.Steps != nil {
+		return expandPipeline(r, path)
 	}
 
 	// --- Runnable leaf ---
@@ -186,6 +196,66 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 	}
 
 	return container, nil
+}
+
+// expandPipeline converts a raw pipeline node into the runtime *Pipeline type.
+//
+// Each RawStep is converted to a PipelineStep:
+//   - Command/Argv → Argv (string form is split via strings.Fields)
+//   - Stdin string  → *StepRef (parsed from "steps.<id>.<stream>")
+//   - Other fields  → copied directly
+//
+// Step-reference validation is re-run here so that pipeline nodes originating
+// from type expansion (which bypassed Phase 1) are also validated.
+func expandPipeline(r RawNode, path string) (*Pipeline, error) {
+	// Re-validate steps: catches issues in type-body pipelines that were not
+	// seen during Phase 1 (which only validates top-level nodes).
+	if err := validateRawSteps(r.Steps, path); err != nil {
+		return nil, fmt.Errorf("phase=expand %w", err)
+	}
+
+	p := &Pipeline{NodeName: r.Name}
+
+	for i, raw := range r.Steps {
+		// Build the final argv from whichever command form was used.
+		var argv []string
+		if raw.Command != nil {
+			// String form: split into tokens (template substitution was already
+			// applied by applyTemplatesToStep; step refs are kept as literals).
+			argv = strings.Fields(*raw.Command)
+		} else {
+			argv = raw.Argv
+		}
+
+		// Resolve the cwd pointer to a plain string (empty = inherit).
+		var cwd string
+		if raw.Cwd != nil {
+			cwd = *raw.Cwd
+		}
+
+		// Parse the optional stdin reference ("steps.<id>.stdout").
+		var stdinRef *StepRef
+		if raw.Stdin != "" {
+			stepID, stream, err := parseStdinRef(raw.Stdin)
+			if err != nil {
+				return nil, fmt.Errorf("phase=expand path=%s[%d]: stdin: %w", path, i, err)
+			}
+			stdinRef = &StepRef{StepID: stepID, Stream: stream}
+		}
+
+		p.Steps = append(p.Steps, PipelineStep{
+			ID:      raw.ID,
+			Argv:    argv,
+			Cwd:     cwd,
+			Env:     raw.Env,
+			Capture: raw.Capture,
+			Tee:     raw.Tee,
+			Stdin:   stdinRef,
+			OnFail:  raw.OnFail,
+		})
+	}
+
+	return p, nil
 }
 
 // withType returns a new stack with t appended, without mutating the original slice.

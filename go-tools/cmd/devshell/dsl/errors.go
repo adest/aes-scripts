@@ -10,4 +10,10 @@ var (
 	ErrInvalidNode       = errors.New("invalid node definition")
 	ErrMissingParam      = errors.New("missing required param")
 	ErrUnknownParam      = errors.New("unknown param")
+
+	// Pipeline step errors.
+	ErrStepRefBadFormat  = errors.New("invalid step reference format")   // e.g. wrong syntax for steps.<id>.<stream>
+	ErrStepRefUnknown    = errors.New("step reference to unknown id")    // no step with that id
+	ErrStepRefForward    = errors.New("step reference to a later step")  // forward references are forbidden
+	ErrStepRefUncaptured = errors.New("step reference to uncaptured stream") // referenced step does not capture that stream
 )

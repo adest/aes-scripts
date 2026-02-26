@@ -106,31 +106,73 @@ This is a strict **XOR rule**.
 
 ## 3.1 Runnable Node
 
-A **runnable node** defines a shell command.
+A **runnable node** defines a command to execute. The `command` key supports three equivalent forms.
 
-Example:
+---
+
+**Compact string form**
 
 ```yaml
-- name: build
-  command: go build ./...
-  cwd: ./backend
-  env:
-    GOFLAGS: "-mod=vendor"
+- name: up
+  command: docker compose up -d
 ```
 
-**Optional properties:**
+The string is split into argv (shlex-style, deterministic, no implicit shell).
 
-- `cwd`: string (optional) — working directory for command execution
-- `env`: map<string, string> (optional) — environment variables for command execution
+---
+
+**Array form**
+
+```yaml
+- name: up
+  command: ["docker", "compose", "up", "-d"]
+```
+
+Each element is an argv token. No splitting is performed.
+
+---
+
+**Long form with `args`**
+
+```yaml
+- name: up
+  command: docker
+  args:
+    - compose
+    - up
+    - "-d"
+```
+
+`command` is the executable token (single word). `args` provides the additional arguments.
+
+---
+
+All three forms produce the same argv: `["docker", "compose", "up", "-d"]`.
+
+**Properties:**
+
+| Key | Required | Type | Description |
+|-----|----------|------|-------------|
+| `command` | yes | string or sequence of strings | The executable and its arguments |
+| `args` | no | sequence of strings | Additional arguments. Forbidden if `command` is an array |
+| `cwd` | no | string | Working directory for command execution |
+| `env` | no | map<string, string> | Environment variables for command execution |
 
 **Constraints:**
 
 * MUST define `command`
-* MAY define `cwd` (optional)
-* MAY define `env` (optional)
+* `command` MUST NOT be empty (empty string, empty array, or empty first token)
+* If `command` is an **array** → `args` MUST NOT be present
+* If `command` is a **string** and `args` is present → `command` MUST be a single token (no whitespace)
+* If `command` is a **string** and `args` is absent → the string is split as argv (shlex-style)
 * MUST NOT define `children`
 * MUST NOT define `uses`
-* `command` MUST NOT be empty
+
+**Template substitution** (applicable inside type bodies only):
+
+* String form: template applied to the full string **before** argv splitting
+* Array form: template applied to **each element** independently
+* Long form: template applied to the `command` token and to **each element** of `args` independently
 
 ---
 
@@ -162,15 +204,33 @@ Example:
 
 An **abstract node** delegates its structure to one or more types.
 
-Example (no params):
+Example (shorthand string form — single type):
+
+```yaml
+- name: stack
+  uses: docker-compose
+```
+
+Example (shorthand string form with params):
+
+```yaml
+- name: stack
+  uses: docker-compose
+  with:
+    file: docker-compose.yml
+    profile: production
+```
+
+Example (list form — multiple types):
 
 ```yaml
 - name: stack
   uses:
     - docker-compose
+    - kubernetes
 ```
 
-Example (shared param bag):
+Example (list form, shared param bag):
 
 ```yaml
 - name: stack
@@ -197,6 +257,7 @@ Example (per-type params, for multi-type with distinct param sets):
 
 **Properties:**
 
+- `uses` (required): string or sequence of strings. A string is normalized to a single-element list at parse time.
 - `with` (optional): parameters passed to the expanded type(s). Two forms are accepted:
   - **Mapping form** — a flat map of scalar values, shared across all types in `uses`.
   - **List form** — a list of objects, each with a `type` key and scalar param entries. Used when different types in `uses` require distinct param sets.
@@ -206,7 +267,7 @@ Example (per-type params, for multi-type with distinct param sets):
 * MUST define `uses`
 * MUST NOT define `command`
 * MUST NOT define `children`
-* MUST contain at least **one entry in `uses`**
+* `uses` MUST NOT be empty (non-empty string, or list with at least one entry)
 * `with` values MUST be scalars (string or number)
 * In list form, each entry MUST declare a `type` that is present in `uses`
 
@@ -367,6 +428,11 @@ Rules:
 * Node must not be empty
 * `with` mapping form: values must be scalars
 * `with` list form: each entry must have a `type` key; values must be scalars
+* `uses` string form is normalized to a single-element list; the resulting list must be non-empty
+* `command` MUST NOT be empty (empty string, empty array, or empty first token)
+* If `command` is an **array** → `args` MUST NOT be present
+* If `command` is a **string** and `args` is present → `command` MUST be a single token (no whitespace)
+* `args` is only valid on runnable nodes (requires `command`)
 
 ---
 
@@ -376,6 +442,10 @@ Rules:
 * Unknown params (not declared in `params`) → error
 * Default values are applied for omitted optional params
 * Template substitution is applied to all string values in the type body (including `name` fields)
+* For `command`:
+  * String form: template applied to the full string **before** argv splitting
+  * Array form: template applied to **each element** independently
+  * Long form: template applied to the `command` token and to **each element** of `args` independently
 * Name uniqueness is checked after substitution
 * All `uses` are expanded using the type registry
 * Expansion is recursive until no abstract nodes remain
@@ -439,11 +509,39 @@ The expansion process **must be deterministic**.
 
 # 11. Examples
 
-### Runnable Node
+### Runnable Node — compact string form
 
 ```yaml
 - name: build
   command: go build ./...
+```
+
+### Runnable Node — array form
+
+```yaml
+- name: run
+  command: ["docker", "run", "--rm", "myimage"]
+```
+
+### Runnable Node — long form with args
+
+```yaml
+- name: up
+  command: docker
+  args:
+    - compose
+    - up
+    - "-d"
+```
+
+### Runnable Node — with cwd and env
+
+```yaml
+- name: build
+  command: go build ./...
+  cwd: ./backend
+  env:
+    GOFLAGS: "-mod=vendor"
 ```
 
 ### Container Node
@@ -457,12 +555,29 @@ The expansion process **must be deterministic**.
       command: go test ./...
 ```
 
-### Abstract Node (no params)
+### Abstract Node — shorthand string form
+
+```yaml
+- name: stack
+  uses: docker-compose
+```
+
+### Abstract Node — shorthand with params
+
+```yaml
+- name: stack
+  uses: docker-compose
+  with:
+    file: docker-compose.yml
+```
+
+### Abstract Node — list form (multiple types)
 
 ```yaml
 - name: stack
   uses:
     - docker-compose
+    - kubernetes
 ```
 
 ### Parameterized type with shared params

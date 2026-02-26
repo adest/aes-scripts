@@ -2,9 +2,21 @@ package dsl
 
 // RawNode represents a node as parsed from an external source (e.g. YAML).
 // It is intentionally format-agnostic: no serialization tags.
+//
+// A runnable node carries exactly one of Command or Argv — never both:
+//
+//   - Command (*string): the compact string form. Template substitution is applied
+//     to the whole string first; the result is split into argv with strings.Fields
+//     during expansion. This preserves template expressions that span tokens
+//     (e.g. "docker compose -f {{ .file }} up -d").
+//
+//   - Argv ([]string): the pre-tokenized form, produced by either the array form
+//     ("command: [...]") or the long form ("command: exe" + "args: [...]").
+//     Template substitution is applied to each element independently.
 type RawNode struct {
 	Name     string
-	Command  *string
+	Command  *string  // string form: template applied to whole string, then split
+	Argv     []string // array/long form: already tokenized; template applied per-element
 	Cwd      *string
 	Env      map[string]string
 	Children []RawNode

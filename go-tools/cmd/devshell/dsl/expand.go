@@ -1,6 +1,9 @@
 package dsl
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // expandRoot wraps the top-level node list in an implicit root Container.
 func expandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
@@ -59,14 +62,21 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 	}
 
 	// --- Runnable leaf ---
-	if r.Command != nil {
+	if r.Command != nil || r.Argv != nil {
+		var argv []string
+		if r.Command != nil {
+			// String form: split after template substitution.
+			argv = strings.Fields(*r.Command)
+		} else {
+			argv = r.Argv
+		}
 		var cwd string
 		if r.Cwd != nil {
 			cwd = *r.Cwd
 		}
 		return &Runnable{
 			NodeName: r.Name,
-			Command:  *r.Command,
+			Argv:     argv,
 			Cwd:      cwd,
 			Env:      r.Env,
 		}, nil

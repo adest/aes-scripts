@@ -67,8 +67,9 @@ func requireRunnable(t *testing.T, node dsl.Node, wantName, wantCmd string) *dsl
 	if r.Name() != wantName {
 		t.Errorf("runnable name: want %q, got %q", wantName, r.Name())
 	}
-	if r.Command != wantCmd {
-		t.Errorf("runnable command: want %q, got %q", wantCmd, r.Command)
+	gotCmd := strings.Join(r.Argv, " ")
+	if gotCmd != wantCmd {
+		t.Errorf("runnable argv: want %q, got %q (argv=%v)", wantCmd, gotCmd, r.Argv)
 	}
 	return r
 }
@@ -95,7 +96,7 @@ func snapshotTree(n dsl.Node) string {
 	walk = func(node dsl.Node, path string) {
 		switch x := node.(type) {
 		case *dsl.Runnable:
-			fmt.Fprintf(&b, "R %s cmd=%q cwd=%q\n", path, x.Command, x.Cwd)
+			fmt.Fprintf(&b, "R %s cmd=%q cwd=%q\n", path, strings.Join(x.Argv, " "), x.Cwd)
 		case *dsl.Container:
 			fmt.Fprintf(&b, "C %s\n", path)
 			for _, c := range x.Children {
@@ -469,6 +470,90 @@ func TestBuild_Section3_1_RunnableNode(t *testing.T) {
 		root := requireBuildOK(t, yml)
 		requireRunnable(t, root.Children[0], "run", "docker run --rm -e FOO=bar -v /host:/container my-image:latest")
 	})
+
+	// --- new command forms (§3.1) ---
+
+	t.Run("array form: argv tokens used directly", func(t *testing.T) {
+		yml := `
+- name: up
+  command: ["docker", "compose", "up", "-d"]
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "up", "docker compose up -d")
+		if len(r.Argv) != 4 {
+			t.Errorf("expected 4 argv tokens, got %d: %v", len(r.Argv), r.Argv)
+		}
+	})
+
+	t.Run("array form: equivalent to string form", func(t *testing.T) {
+		ymlString := `
+- name: build
+  command: go build ./...
+`
+		ymlArray := `
+- name: build
+  command: ["go", "build", "./..."]
+`
+		r1 := requireBuildOK(t, ymlString)
+		r2 := requireBuildOK(t, ymlArray)
+		n1 := r1.Children[0].(*dsl.Runnable)
+		n2 := r2.Children[0].(*dsl.Runnable)
+		if strings.Join(n1.Argv, " ") != strings.Join(n2.Argv, " ") {
+			t.Errorf("string and array forms differ: %v vs %v", n1.Argv, n2.Argv)
+		}
+	})
+
+	t.Run("long form: command token + args merged into argv", func(t *testing.T) {
+		yml := `
+- name: up
+  command: docker
+  args:
+    - compose
+    - up
+    - "-d"
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "up", "docker compose up -d")
+		if len(r.Argv) != 4 {
+			t.Errorf("expected 4 argv tokens, got %d: %v", len(r.Argv), r.Argv)
+		}
+	})
+
+	t.Run("long form: equivalent to string and array forms", func(t *testing.T) {
+		ymlLong := `
+- name: build
+  command: go
+  args: ["build", "./..."]
+`
+		root := requireBuildOK(t, ymlLong)
+		requireRunnable(t, root.Children[0], "build", "go build ./...")
+	})
+
+	t.Run("array form + args: parse error", func(t *testing.T) {
+		yml := `
+- name: up
+  command: ["docker", "compose"]
+  args: ["up"]
+`
+		requireBuildErr(t, yml, "args is forbidden when command is an array")
+	})
+
+	t.Run("long form: multi-token command string → parse error", func(t *testing.T) {
+		yml := `
+- name: up
+  command: docker compose
+  args: ["up"]
+`
+		requireBuildErr(t, yml, "single token")
+	})
+
+	t.Run("array form: empty array → raw error", func(t *testing.T) {
+		yml := `
+- name: up
+  command: []
+`
+		requireBuildErr(t, yml, "phase=raw", "command must not be empty")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +689,80 @@ nodes:
   uses: []
 `
 		requireBuildErr(t, yml, "phase=raw", "at least one entry", "path=abstract")
+	})
+
+	// --- uses shorthand (§3.3) ---
+
+	t.Run("uses shorthand string: equivalent to single-element list", func(t *testing.T) {
+		yml := `
+types:
+  t:
+    name: r
+    command: echo ok
+nodes:
+  - name: stack
+    uses: t
+`
+		requireBuildOK(t, yml)
+	})
+
+	t.Run("uses shorthand string: expanded correctly", func(t *testing.T) {
+		yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+    children:
+      - name: up
+        command: docker compose -f {{ .file }} up -d
+      - name: down
+        command: docker compose -f {{ .file }} down
+nodes:
+  - name: stack
+    uses: docker-compose
+    with:
+      file: docker-compose.yml
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		requireRunnable(t, c.Children[0], "up", "docker compose -f docker-compose.yml up -d")
+		requireRunnable(t, c.Children[1], "down", "docker compose -f docker-compose.yml down")
+	})
+
+	t.Run("uses shorthand: string and list forms produce identical result", func(t *testing.T) {
+		ymlString := `
+types:
+  t:
+    name: gen
+    command: echo hello
+nodes:
+  - name: stack
+    uses: t
+`
+		ymlList := `
+types:
+  t:
+    name: gen
+    command: echo hello
+nodes:
+  - name: stack
+    uses:
+      - t
+`
+		r1 := requireBuildOK(t, ymlString)
+		r2 := requireBuildOK(t, ymlList)
+		if snapshotTree(r1) != snapshotTree(r2) {
+			t.Errorf("string and list uses forms differ:\nstring: %s\nlist:   %s",
+				snapshotTree(r1), snapshotTree(r2))
+		}
+	})
+
+	t.Run("uses shorthand: empty string → parse error", func(t *testing.T) {
+		yml := `
+- name: abstract
+  uses: ""
+`
+		requireBuildErr(t, yml, "uses")
 	})
 
 	t.Run("with mapping form: shared params passed to type", func(t *testing.T) {
@@ -2127,8 +2286,8 @@ func TestModel_AsRunnable(t *testing.T) {
 		if !ok {
 			t.Fatal("expected ok=true")
 		}
-		if r.Command != "go build ./..." {
-			t.Errorf("unexpected command: %q", r.Command)
+		if strings.Join(r.Argv, " ") != "go build ./..." {
+			t.Errorf("unexpected argv: %v", r.Argv)
 		}
 	})
 

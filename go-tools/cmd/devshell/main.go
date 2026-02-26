@@ -108,14 +108,11 @@ func resolvePath(root *dsl.Container, args []string) (*dsl.Runnable, []string, e
 }
 
 // execute runs a Runnable with its configured cwd and env.
-// Extra args are appended to the command string.
+// Extra args are appended to the argv. No implicit shell is used.
 func execute(r *dsl.Runnable, extraArgs []string) error {
-	command := r.Command
-	if len(extraArgs) > 0 {
-		command = command + " " + strings.Join(extraArgs, " ")
-	}
+	argv := append(append([]string(nil), r.Argv...), extraArgs...)
 
-	cmd := exec.Command("sh", "-c", command)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

@@ -14,12 +14,13 @@ type Container struct {
 	Children []Node
 }
 
-// Runnable defines an executable shell command.
+// Runnable defines an executable command.
+// Argv holds the argument vector: Argv[0] is the executable, Argv[1:] are the arguments.
 // Cwd is optional; empty means use the process working directory.
 // Env is optional extra environment variables merged into the process environment.
 type Runnable struct {
 	NodeName string
-	Command  string
+	Argv     []string
 	Cwd      string
 	Env      map[string]string
 }

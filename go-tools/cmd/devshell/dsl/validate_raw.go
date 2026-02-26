@@ -31,7 +31,7 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 	}
 	siblings[n.Name] = struct{}{}
 
-	hasCommand := n.Command != nil
+	hasCommand := n.Command != nil || n.Argv != nil
 	hasChildren := n.Children != nil
 	hasUses := n.Uses != nil
 
@@ -70,7 +70,13 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 
 	switch {
 	case hasCommand:
-		if strings.TrimSpace(*n.Command) == "" {
+		empty := false
+		if n.Command != nil {
+			empty = strings.TrimSpace(*n.Command) == ""
+		} else {
+			empty = len(n.Argv) == 0 || strings.TrimSpace(n.Argv[0]) == ""
+		}
+		if empty {
 			return fmt.Errorf("phase=raw path=%s: runnable command must not be empty", path)
 		}
 	case hasChildren:
@@ -152,7 +158,7 @@ func validateRuntimeNode(n Node, siblings map[string]struct{}, path string) erro
 			}
 		}
 	case *Runnable:
-		if strings.TrimSpace(node.Command) == "" {
+		if len(node.Argv) == 0 || strings.TrimSpace(node.Argv[0]) == "" {
 			return fmt.Errorf("phase=runtime path=%s: runnable command must not be empty", path)
 		}
 	default:

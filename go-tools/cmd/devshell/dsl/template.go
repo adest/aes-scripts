@@ -29,11 +29,25 @@ func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 	}
 
 	if r.Command != nil {
+		// String form: apply template to the whole string.
+		// Splitting into argv happens later in expand.go, after substitution.
 		s, err := substituteString(*r.Command, params)
 		if err != nil {
 			return RawNode{}, fmt.Errorf("command: %w", err)
 		}
 		out.Command = &s
+	}
+
+	if r.Argv != nil {
+		// Array/long form: apply template to each token independently.
+		out.Argv = make([]string, len(r.Argv))
+		for i, token := range r.Argv {
+			s, err := substituteString(token, params)
+			if err != nil {
+				return RawNode{}, fmt.Errorf("command[%d]: %w", i, err)
+			}
+			out.Argv[i] = s
+		}
 	}
 
 	if r.Cwd != nil {

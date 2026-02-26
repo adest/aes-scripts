@@ -2,6 +2,7 @@ package dslyaml
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 
 	"go-tools/cmd/devshell/dsl"
@@ -22,8 +23,9 @@ type Document struct {
 // ---- Internal YAML parsing structs ----------------------------------------
 //
 // These types mirror the public dsl types but carry YAML struct tags and handle
-// format-specific concerns (polymorphic `with`, scalar normalisation for
-// `params`). They are converted to dsl types before being returned to callers.
+// format-specific concerns (polymorphic `command`, `uses`, `with`, scalar
+// normalisation for `params`). They are converted to dsl types before being
+// returned to callers.
 
 // yamlDocument is the internal YAML parsing struct for a DSL file in mapping form.
 type yamlDocument struct {
@@ -40,12 +42,17 @@ type yamlTypeDef struct {
 	Params map[string]interface{} `yaml:"params,omitempty"`
 
 	// Node body fields — same as yamlRawNode.
-	Name     string            `yaml:"name"`
-	Command  *string           `yaml:"command,omitempty"`
+	Name string            `yaml:"name"`
+	// Command uses yaml.Node for polymorphic decoding (string or sequence).
+	// An absent `command` key is detected by checking Command.Kind == 0.
+	Command  yaml.Node         `yaml:"command,omitempty"`
+	Args     []string          `yaml:"args,omitempty"`
 	Cwd      *string           `yaml:"cwd,omitempty"`
 	Env      map[string]string `yaml:"env,omitempty"`
 	Children []yamlRawNode     `yaml:"children,omitempty"`
-	Uses     []string          `yaml:"uses,omitempty"`
+	// Uses uses yaml.Node for polymorphic decoding (string or sequence).
+	// An absent `uses` key is detected by checking Uses.Kind == 0.
+	Uses yaml.Node `yaml:"uses,omitempty"`
 	// With uses yaml.Node (not *yaml.Node) because yaml.v3 does not populate
 	// *yaml.Node fields correctly when decoding into a struct — the Kind ends
 	// up as 0. A non-pointer yaml.Node is decoded correctly.
@@ -54,16 +61,21 @@ type yamlTypeDef struct {
 }
 
 // yamlRawNode is the YAML representation of a node.
-// It is identical to dsl.RawNode except that `with` is held as yaml.Node
-// for polymorphic decoding (see the comment on yamlTypeDef.With).
+// It is identical to dsl.RawNode except that `command`, `uses`, and `with`
+// are held as yaml.Node for polymorphic decoding.
 type yamlRawNode struct {
-	Name     string            `yaml:"name"`
-	Command  *string           `yaml:"command,omitempty"`
+	Name string `yaml:"name"`
+	// Command uses yaml.Node for polymorphic decoding (string or sequence).
+	// An absent `command` key is detected by checking Command.Kind == 0.
+	Command  yaml.Node         `yaml:"command,omitempty"`
+	Args     []string          `yaml:"args,omitempty"`
 	Cwd      *string           `yaml:"cwd,omitempty"`
 	Env      map[string]string `yaml:"env,omitempty"`
 	Children []yamlRawNode     `yaml:"children,omitempty"`
-	Uses     []string          `yaml:"uses,omitempty"`
-	With     yaml.Node         `yaml:"with,omitempty"`
+	// Uses uses yaml.Node for polymorphic decoding (string or sequence).
+	// An absent `uses` key is detected by checking Uses.Kind == 0.
+	Uses yaml.Node `yaml:"uses,omitempty"`
+	With yaml.Node `yaml:"with,omitempty"`
 }
 
 // ---- Parse -----------------------------------------------------------------
@@ -146,6 +158,7 @@ func convertTypeDef(ytd yamlTypeDef) (dsl.TypeDef, error) {
 	body, err := convertNode(yamlRawNode{
 		Name:     ytd.Name,
 		Command:  ytd.Command,
+		Args:     ytd.Args,
 		Cwd:      ytd.Cwd,
 		Env:      ytd.Env,
 		Children: ytd.Children,
@@ -247,13 +260,44 @@ func convertNodes(raw []yamlRawNode) ([]dsl.RawNode, error) {
 // convertNode converts a single yamlRawNode to dsl.RawNode.
 func convertNode(yn yamlRawNode) (dsl.RawNode, error) {
 	r := dsl.RawNode{
-		Name:    yn.Name,
-		Command: yn.Command,
-		Cwd:     yn.Cwd,
-		Env:     yn.Env,
-		Uses:    yn.Uses,
+		Name: yn.Name,
+		Cwd:  yn.Cwd,
+		Env:  yn.Env,
 	}
 
+	// --- command ---
+	// command supports three equivalent forms (§3.1):
+	//   1. Compact string: command: go build ./...
+	//      → RawNode.Command (*string): template applied first, then split during expansion.
+	//   2. Array:          command: ["go", "build", "./..."]
+	//      → RawNode.Argv ([]string): already tokenized, template applied per-element.
+	//   3. Long form:      command: go
+	//                      args: [build, "./..."]
+	//      → RawNode.Argv ([]string): command token prepended to args.
+	if yn.Command.Kind != 0 {
+		cmd, argv, err := convertCommandNode(&yn.Command, yn.Args)
+		if err != nil {
+			return dsl.RawNode{}, err
+		}
+		r.Command = cmd
+		r.Argv = argv
+	} else if len(yn.Args) > 0 {
+		return dsl.RawNode{}, fmt.Errorf("phase=parse path=%s: args requires command", yn.Name)
+	}
+
+	// --- uses ---
+	// uses supports two forms (§3.3):
+	//   1. Shorthand string: uses: docker-compose
+	//   2. List:             uses: [docker-compose, kubernetes]
+	if yn.Uses.Kind != 0 {
+		uses, err := convertUsesNode(&yn.Uses)
+		if err != nil {
+			return dsl.RawNode{}, fmt.Errorf("phase=parse path=%s: uses: %w", yn.Name, err)
+		}
+		r.Uses = uses
+	}
+
+	// --- children ---
 	// Preserve an explicit empty children slice (e.g. `children: []`) so that
 	// downstream validation can distinguish "children key absent" (nil) from
 	// "children key present but empty" (non-nil empty slice).
@@ -268,9 +312,8 @@ func convertNode(yn yamlRawNode) (dsl.RawNode, error) {
 		}
 	}
 
+	// --- with ---
 	// yaml.Node.Kind == 0 means the field was absent in the YAML source.
-	// We use a non-pointer yaml.Node (not *yaml.Node) because yaml.v3 does
-	// not correctly populate *yaml.Node struct fields — Kind stays 0.
 	if yn.With.Kind != 0 {
 		wb, err := convertWithBlock(&yn.With)
 		if err != nil {
@@ -280,6 +323,83 @@ func convertNode(yn yamlRawNode) (dsl.RawNode, error) {
 	}
 
 	return r, nil
+}
+
+// convertCommandNode normalises the three YAML command forms.
+//
+// Returns (cmd, argv, err) where exactly one of cmd or argv is non-nil:
+//
+//   - String form  → cmd = &value, argv = nil.
+//     Template is applied to the whole string in applyTemplates; splitting
+//     into argv happens in expand.go after substitution (strings.Fields).
+//
+//   - Array form   → cmd = nil, argv = decoded elements.
+//     Template is applied per-element.
+//
+//   - Long form    → cmd = nil, argv = [command] + args.
+//     Template is applied per-element.
+func convertCommandNode(node *yaml.Node, args []string) (*string, []string, error) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		value := node.Value
+		if len(args) > 0 {
+			// Long form: command must be a single token (no whitespace).
+			if strings.ContainsAny(value, " \t\n\r") {
+				return nil, nil, fmt.Errorf(
+					"command must be a single token when args is present (no whitespace); "+
+						"got %q — use the array form instead: command: [%q, ...]",
+					value, strings.Fields(value)[0],
+				)
+			}
+			if value == "" {
+				return nil, nil, fmt.Errorf("command must not be empty")
+			}
+			argv := make([]string, 0, 1+len(args))
+			argv = append(argv, value)
+			argv = append(argv, args...)
+			return nil, argv, nil
+		}
+		// Compact string form: keep as a raw string for template substitution.
+		// Splitting happens after template substitution in expand.go.
+		return &value, nil, nil
+
+	case yaml.SequenceNode:
+		if len(args) > 0 {
+			return nil, nil, fmt.Errorf("args is forbidden when command is an array")
+		}
+		var argv []string
+		if err := node.Decode(&argv); err != nil {
+			return nil, nil, fmt.Errorf("command array: %w", err)
+		}
+		return nil, argv, nil
+
+	default:
+		return nil, nil, fmt.Errorf("command must be a string or sequence, got YAML kind %d", node.Kind)
+	}
+}
+
+// convertUsesNode normalises the two YAML uses forms into a string slice.
+//
+// String form: uses: docker-compose  → []string{"docker-compose"}
+// List form:   uses: [a, b]          → []string{"a", "b"}
+func convertUsesNode(node *yaml.Node) ([]string, error) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value == "" {
+			return nil, fmt.Errorf("uses must not be empty")
+		}
+		return []string{node.Value}, nil
+
+	case yaml.SequenceNode:
+		var uses []string
+		if err := node.Decode(&uses); err != nil {
+			return nil, fmt.Errorf("uses sequence: %w", err)
+		}
+		return uses, nil
+
+	default:
+		return nil, fmt.Errorf("uses must be a string or sequence, got YAML kind %d", node.Kind)
+	}
 }
 
 // convertWithBlock converts a polymorphic YAML `with` node to dsl.WithBlock.

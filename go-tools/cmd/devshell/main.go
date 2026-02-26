@@ -30,11 +30,18 @@ func main() {
 			if err != nil {
 				return err
 			}
-			runnable, extraArgs, err := resolvePath(root, args)
+			node, extraArgs, err := resolvePath(root, args)
 			if err != nil {
 				return err
 			}
-			return execute(runnable, extraArgs)
+			switch n := node.(type) {
+			case *dsl.Runnable:
+				return execute(n, extraArgs)
+			case *dsl.Pipeline:
+				return executePipeline(n)
+			default:
+				return fmt.Errorf("unexpected node type %T", node)
+			}
 		},
 	}
 
@@ -78,11 +85,16 @@ func load(flagFiles, flagRegistryDirs []string) (*dsl.Container, error) {
 	return loadSources(registryDirs, nodeFiles)
 }
 
-// resolvePath walks args greedily to find the target Runnable.
-// Once a Runnable is reached, any remaining args are returned as extra args
-// to be appended to the command. Use -- to pass flag-like extra args without
-// Cobra intercepting them (e.g. devshell backend build -- --race).
-func resolvePath(root *dsl.Container, args []string) (*dsl.Runnable, []string, error) {
+// resolvePath walks args greedily to find the target executable node.
+//
+// It returns either a *Runnable or a *Pipeline. Once a Runnable is reached,
+// any remaining args are returned as extra args to be appended to the command.
+// Use -- to pass flag-like extra args without Cobra intercepting them
+// (e.g. devshell backend build -- --race).
+//
+// Pipelines are leaf nodes: reaching one during traversal stops the walk.
+// Extra args are not supported for pipelines (steps have fixed argv).
+func resolvePath(root *dsl.Container, args []string) (dsl.Node, []string, error) {
 	var current dsl.Node = root
 	var navigated []string
 
@@ -90,6 +102,10 @@ func resolvePath(root *dsl.Container, args []string) (*dsl.Runnable, []string, e
 		if r, ok := dsl.AsRunnable(current); ok {
 			// Already at a Runnable: the remaining args go to the command.
 			return r, args[i:], nil
+		}
+		if _, ok := dsl.AsPipeline(current); ok {
+			// Already at a Pipeline: it is a leaf — remaining args are not forwarded.
+			return current, nil, nil
 		}
 		c, _ := dsl.AsContainer(current)
 		child, ok := c.Find(arg)
@@ -102,6 +118,9 @@ func resolvePath(root *dsl.Container, args []string) (*dsl.Runnable, []string, e
 
 	if r, ok := dsl.AsRunnable(current); ok {
 		return r, nil, nil
+	}
+	if _, ok := dsl.AsPipeline(current); ok {
+		return current, nil, nil
 	}
 	c, _ := dsl.AsContainer(current)
 	return nil, nil, isContainerError(navigated, c)

@@ -562,11 +562,11 @@ func TestBuild_Section3_2_ContainerNode(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §3.3 — Abstract node
+// §3.3 — Abstract node + `with`
 // ---------------------------------------------------------------------------
 
 func TestBuild_Section3_3_AbstractNode(t *testing.T) {
-	t.Run("uses with single type: raw valid", func(t *testing.T) {
+	t.Run("uses with single type: valid", func(t *testing.T) {
 		yml := `
 types:
   t:
@@ -580,7 +580,7 @@ nodes:
 		requireBuildOK(t, yml)
 	})
 
-	t.Run("uses with multiple types: raw valid", func(t *testing.T) {
+	t.Run("uses with multiple types: valid", func(t *testing.T) {
 		yml := `
 types:
   a:
@@ -605,13 +605,547 @@ nodes:
 `
 		requireBuildErr(t, yml, "phase=raw", "at least one entry", "path=abstract")
 	})
+
+	t.Run("with mapping form: shared params passed to type", func(t *testing.T) {
+		yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+    children:
+      - name: up
+        command: docker compose -f {{ .file }} up -d
+      - name: stop
+        command: docker compose -f {{ .file }} stop
+nodes:
+  - name: stack
+    uses:
+      - docker-compose
+    with:
+      file: docker-compose.yml
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		requireRunnable(t, c.Children[0], "up", "docker compose -f docker-compose.yml up -d")
+		requireRunnable(t, c.Children[1], "stop", "docker compose -f docker-compose.yml stop")
+	})
+
+	t.Run("with list form: per-type params", func(t *testing.T) {
+		yml := `
+types:
+  svc-a:
+    params:
+      host: ~
+    name: service-a
+    command: start {{ .host }}
+  svc-b:
+    params:
+      port: ~
+    name: service-b
+    command: start :{{ .port }}
+nodes:
+  - name: stack
+    uses:
+      - svc-a
+      - svc-b
+    with:
+      - type: svc-a
+        host: localhost
+      - type: svc-b
+        port: "8080"
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		requireRunnable(t, c.Children[0], "service-a", "start localhost")
+		requireRunnable(t, c.Children[1], "service-b", "start :8080")
+	})
+
+	t.Run("with on non-abstract node (runnable) → raw error", func(t *testing.T) {
+		// Construct RawNode directly to bypass YAML parsing (YAML would
+		// normally not parse `with` on a runnable node, but we test the
+		// raw validator's guard regardless).
+		cmd := "go build"
+		r := dsl.RawNode{
+			Name:    "build",
+			Command: &cmd,
+			With:    &dsl.WithBlock{Shared: map[string]string{"file": "x"}},
+		}
+		reg := dsl.NewRegistry()
+		_, err := dsl.NewEngine(reg).Build([]dsl.RawNode{r})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "phase=raw") {
+			t.Errorf("expected phase=raw in error, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "'with' can only be used") {
+			t.Errorf("expected with-only-on-abstract message in error, got: %v", err)
+		}
+	})
+
+	t.Run("with list form: entry missing 'type' → raw error", func(t *testing.T) {
+		r := dsl.RawNode{
+			Name: "stack",
+			Uses: []string{"some-type"},
+			With: &dsl.WithBlock{
+				PerType: []dsl.TypedWith{{Type: ""}},
+			},
+		}
+		reg := dsl.NewRegistry()
+		_, err := dsl.NewEngine(reg).Build([]dsl.RawNode{r})
+		if err == nil {
+			t.Fatal("expected error for empty type in with list")
+		}
+		if !strings.Contains(err.Error(), "phase=raw") {
+			t.Errorf("expected phase=raw in error, got: %v", err)
+		}
+	})
+
+	t.Run("with list form: type references type not in uses → expand error", func(t *testing.T) {
+		yml := `
+types:
+  known:
+    name: k
+    command: echo k
+nodes:
+  - name: stack
+    uses:
+      - known
+    with:
+      - type: unknown-type
+        key: val
+`
+		requireBuildErr(t, yml, "phase=expand", "not in uses")
+	})
 }
 
 // ---------------------------------------------------------------------------
-// §4 — Type expansion
+// §4 — Type parameters
 // ---------------------------------------------------------------------------
 
-func TestBuild_Section4_TypeExpansion(t *testing.T) {
+func TestBuild_Section4_TypeParameters(t *testing.T) {
+	t.Run("required param provided: success", func(t *testing.T) {
+		yml := `
+types:
+  greeter:
+    params:
+      name: ~
+    command: echo hello {{ .name }}
+nodes:
+  - name: greet
+    uses:
+      - greeter
+    with:
+      name: world
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "greet", "echo hello world")
+	})
+
+	t.Run("required param missing → expand error with ErrMissingParam", func(t *testing.T) {
+		yml := `
+types:
+  greeter:
+    params:
+      name: ~
+    command: echo hello {{ .name }}
+nodes:
+  - name: greet
+    uses:
+      - greeter
+`
+		err := requireBuildErr(t, yml, "phase=expand")
+		if !errors.Is(err, dsl.ErrMissingParam) {
+			t.Errorf("expected ErrMissingParam, got %v", err)
+		}
+	})
+
+	t.Run("unknown param provided → expand error with ErrUnknownParam", func(t *testing.T) {
+		yml := `
+types:
+  greeter:
+    params:
+      name: ~
+    command: echo hello {{ .name }}
+nodes:
+  - name: greet
+    uses:
+      - greeter
+    with:
+      name: world
+      typo: oops
+`
+		err := requireBuildErr(t, yml, "phase=expand")
+		if !errors.Is(err, dsl.ErrUnknownParam) {
+			t.Errorf("expected ErrUnknownParam, got %v", err)
+		}
+	})
+
+	t.Run("type with no params + no with: success", func(t *testing.T) {
+		yml := `
+types:
+  simple:
+    command: echo ok
+nodes:
+  - name: x
+    uses:
+      - simple
+`
+		requireBuildOK(t, yml)
+	})
+
+	t.Run("type with no params + with provided → unknown param error", func(t *testing.T) {
+		yml := `
+types:
+  simple:
+    command: echo ok
+nodes:
+  - name: x
+    uses:
+      - simple
+    with:
+      unexpected: value
+`
+		err := requireBuildErr(t, yml, "phase=expand")
+		if !errors.Is(err, dsl.ErrUnknownParam) {
+			t.Errorf("expected ErrUnknownParam, got %v", err)
+		}
+	})
+
+	t.Run("optional param omitted: default value applied", func(t *testing.T) {
+		yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+      profile: dev
+    command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+nodes:
+  - name: stack
+    uses:
+      - docker-compose
+    with:
+      file: docker-compose.yml
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "stack",
+			"docker compose -f docker-compose.yml --profile dev up -d")
+	})
+
+	t.Run("optional param overridden by caller", func(t *testing.T) {
+		yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+      profile: dev
+    command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+nodes:
+  - name: stack
+    uses:
+      - docker-compose
+    with:
+      file: docker-compose.yml
+      profile: production
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "stack",
+			"docker compose -f docker-compose.yml --profile production up -d")
+	})
+
+	t.Run("number default value normalised to string", func(t *testing.T) {
+		yml := `
+types:
+  server:
+    params:
+      port: 8080
+    command: ./server --port {{ .port }}
+nodes:
+  - name: srv
+    uses:
+      - server
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "srv", "./server --port 8080")
+	})
+
+	t.Run("number param passed via with normalised to string", func(t *testing.T) {
+		yml := `
+types:
+  server:
+    params:
+      port: ~
+    command: ./server --port {{ .port }}
+nodes:
+  - name: srv
+    uses:
+      - server
+    with:
+      port: 3000
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "srv", "./server --port 3000")
+	})
+
+	t.Run("multiple required params all provided: success", func(t *testing.T) {
+		yml := `
+types:
+  docker-run:
+    params:
+      image: ~
+      tag: ~
+    command: docker run {{ .image }}:{{ .tag }}
+nodes:
+  - name: run
+    uses:
+      - docker-run
+    with:
+      image: myapp
+      tag: v1.2.3
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "run", "docker run myapp:v1.2.3")
+	})
+
+	t.Run("all params have defaults: no with required", func(t *testing.T) {
+		yml := `
+types:
+  server:
+    params:
+      host: localhost
+      port: 8080
+    command: ./server {{ .host }}:{{ .port }}
+nodes:
+  - name: srv
+    uses:
+      - server
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "srv", "./server localhost:8080")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §4.2 — Template syntax
+// ---------------------------------------------------------------------------
+
+func TestBuild_Section4_2_TemplateSyntax(t *testing.T) {
+	t.Run("template in command: substituted correctly", func(t *testing.T) {
+		yml := `
+types:
+  runner:
+    params:
+      script: ~
+    command: bash {{ .script }}
+nodes:
+  - name: x
+    uses:
+      - runner
+    with:
+      script: ./run.sh
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "x", "bash ./run.sh")
+	})
+
+	t.Run("template in cwd: substituted correctly", func(t *testing.T) {
+		yml := `
+types:
+  builder:
+    params:
+      dir: ~
+    command: go build ./...
+    cwd: "{{ .dir }}"
+nodes:
+  - name: build
+    uses:
+      - builder
+    with:
+      dir: ./backend
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "build", "go build ./...")
+		if r.Cwd != "./backend" {
+			t.Errorf("Cwd: want './backend', got %q", r.Cwd)
+		}
+	})
+
+	t.Run("template in env value: substituted correctly", func(t *testing.T) {
+		yml := `
+types:
+  builder:
+    params:
+      mod: vendor
+    command: go build ./...
+    env:
+      GOFLAGS: "-mod={{ .mod }}"
+nodes:
+  - name: build
+    uses:
+      - builder
+    with:
+      mod: readonly
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "build", "go build ./...")
+		if r.Env["GOFLAGS"] != "-mod=readonly" {
+			t.Errorf("GOFLAGS: want '-mod=readonly', got %q", r.Env["GOFLAGS"])
+		}
+	})
+
+	t.Run("template in child node name (dynamic name)", func(t *testing.T) {
+		yml := `
+types:
+  service:
+    params:
+      svc: ~
+    children:
+      - name: "{{ .svc }}-up"
+        command: docker compose up {{ .svc }}
+      - name: "{{ .svc }}-down"
+        command: docker compose down {{ .svc }}
+nodes:
+  - name: stack
+    uses:
+      - service
+    with:
+      svc: api
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		requireRunnable(t, c.Children[0], "api-up", "docker compose up api")
+		requireRunnable(t, c.Children[1], "api-down", "docker compose down api")
+	})
+
+	t.Run("template in type root name used as child name in multi-type expansion", func(t *testing.T) {
+		// Two uses of the same type with different per-type params.
+		// After substitution each gets a distinct name.
+		yml := `
+types:
+  svc:
+    params:
+      id: ~
+    name: "svc-{{ .id }}"
+    command: start {{ .id }}
+nodes:
+  - name: stack
+    uses:
+      - svc
+      - svc
+    with:
+      - type: svc
+        id: alpha
+      - type: svc
+        id: beta
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		requireRunnable(t, c.Children[0], "svc-alpha", "start alpha")
+		requireRunnable(t, c.Children[1], "svc-beta", "start beta")
+	})
+
+	t.Run("duplicate names after template substitution → expand error", func(t *testing.T) {
+		yml := `
+types:
+  svc:
+    params:
+      id: ~
+    name: "{{ .id }}"
+    command: start {{ .id }}
+nodes:
+  - name: stack
+    uses:
+      - svc
+      - svc
+    with:
+      - type: svc
+        id: same
+      - type: svc
+        id: same
+`
+		err := requireBuildErr(t, yml, "phase=expand")
+		if !errors.Is(err, dsl.ErrDuplicateChild) {
+			t.Errorf("expected ErrDuplicateChild, got %v", err)
+		}
+	})
+
+	t.Run("template in nested with value flows into inner type", func(t *testing.T) {
+		// Param names used in {{ .name }} templates must be valid Go identifiers.
+		// Hyphens are not allowed (they are the subtraction operator in templates).
+		// Use underscores: "compose_file" not "compose-file".
+		yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+    command: docker compose -f {{ .file }} up -d
+
+  full-stack:
+    params:
+      compose_file: ~
+    children:
+      - name: docker
+        uses:
+          - docker-compose
+        with:
+          file: "{{ .compose_file }}"
+
+nodes:
+  - name: prod
+    uses:
+      - full-stack
+    with:
+      compose_file: docker-compose.prod.yml
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "prod", 1)
+		requireRunnable(t, c.Children[0], "docker",
+			"docker compose -f docker-compose.prod.yml up -d")
+	})
+
+	t.Run("param name with hyphen → parse error with hint", func(t *testing.T) {
+		// Hyphens in param names are rejected at parse time with a clear hint.
+		yml := `
+types:
+  svc:
+    params:
+      compose-file: ~
+    command: echo hi
+nodes:
+  - name: s
+    uses:
+      - svc
+    with:
+      compose-file: val
+`
+		err := requireBuildErr(t, yml, "compose-file", "hint")
+		_ = err
+	})
+
+	t.Run("template with no markers: string returned unchanged (fast path)", func(t *testing.T) {
+		yml := `
+types:
+  simple:
+    params:
+      x: unused
+    command: echo static
+nodes:
+  - name: n
+    uses:
+      - simple
+    with:
+      x: anything
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "n", "echo static")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §5 — Type expansion
+// ---------------------------------------------------------------------------
+
+func TestBuild_Section5_TypeExpansion(t *testing.T) {
 	t.Run("single use expands to runnable, abstract node name overrides type root name", func(t *testing.T) {
 		yml := `
 types:
@@ -625,7 +1159,6 @@ nodes:
       - my-cmd
 `
 		root := requireBuildOK(t, yml)
-		// The node must have the abstract node name, not the type root name.
 		r := requireRunnable(t, root.Children[0], "stack", "echo hello")
 		if r.Name() == "generated-name" {
 			t.Errorf("type root name must NOT be used; abstract node name must take priority")
@@ -843,13 +1376,37 @@ nodes:
 		requireRunnable(t, stack.Children[1], "down", "docker compose down")
 		requireRunnable(t, root.Children[1], "frontend", "npm run dev")
 	})
+
+	t.Run("expansion is recursive: type body contains abstract nodes", func(t *testing.T) {
+		yml := `
+types:
+  inner:
+    name: inner-node
+    command: echo inner
+
+  outer:
+    name: outer-node
+    children:
+      - name: sub
+        uses:
+          - inner
+
+nodes:
+  - name: top
+    uses:
+      - outer
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "top", 1)
+		requireRunnable(t, c.Children[0], "sub", "echo inner")
+	})
 }
 
 // ---------------------------------------------------------------------------
-// §4.2 — Name resolution for abstract nodes
+// §5.2 — Name resolution for abstract nodes
 // ---------------------------------------------------------------------------
 
-func TestBuild_Section4_2_NameResolution(t *testing.T) {
+func TestBuild_Section5_2_NameResolution(t *testing.T) {
 	t.Run("single use: abstract node name takes priority over type root name", func(t *testing.T) {
 		yml := `
 types:
@@ -888,9 +1445,7 @@ nodes:
       - svc-b
 `
 		root := requireBuildOK(t, yml)
-		// wrapping container must be named "services"
 		c := requireContainer(t, root.Children[0], "services", 2)
-		// children keep the type root names
 		if c.Children[0].Name() != "service-a" {
 			t.Errorf("first child: want 'service-a', got %q", c.Children[0].Name())
 		}
@@ -898,13 +1453,40 @@ nodes:
 			t.Errorf("second child: want 'service-b', got %q", c.Children[1].Name())
 		}
 	})
+
+	t.Run("single use: abstract node name overrides template-generated type root name", func(t *testing.T) {
+		yml := `
+types:
+  docker-compose:
+    params:
+      env: ~
+    name: "compose-{{ .env }}"
+    children:
+      - name: up
+        command: docker compose up -d
+      - name: down
+        command: docker compose down
+nodes:
+  - name: infra
+    uses:
+      - docker-compose
+    with:
+      env: prod
+`
+		// Single-use: abstract node name "infra" overrides the resolved type name "compose-prod".
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "infra", 2)
+		if c.Name() == "compose-prod" {
+			t.Error("abstract node name 'infra' must override template-resolved type root name")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
-// §5 — Name rules
+// §6 — Name rules
 // ---------------------------------------------------------------------------
 
-func TestBuild_Section5_NameRules(t *testing.T) {
+func TestBuild_Section6_NameRules(t *testing.T) {
 	t.Run("duplicate sibling names at top level → raw error", func(t *testing.T) {
 		yml := `
 - name: build
@@ -963,20 +1545,49 @@ func TestBuild_Section5_NameRules(t *testing.T) {
 		requireBuildErr(t, yml, "phase=raw", "duplicate sibling name", "app.backend")
 	})
 
-	t.Run("name with spaces is allowed in YAML (spec does not restrict charset)", func(t *testing.T) {
+	t.Run("name with spaces is allowed (spec does not restrict charset)", func(t *testing.T) {
 		yml := `
 - name: "my build"
   command: go build
 `
 		requireBuildOK(t, yml)
 	})
+
+	t.Run("names resolved after template substitution: two distinct resolved names succeed", func(t *testing.T) {
+		yml := `
+types:
+  svc:
+    params:
+      id: ~
+    name: "svc-{{ .id }}"
+    command: start {{ .id }}
+nodes:
+  - name: stack
+    uses:
+      - svc
+      - svc
+    with:
+      - type: svc
+        id: one
+      - type: svc
+        id: two
+`
+		root := requireBuildOK(t, yml)
+		c := requireContainer(t, root.Children[0], "stack", 2)
+		if c.Children[0].Name() != "svc-one" {
+			t.Errorf("first child: want 'svc-one', got %q", c.Children[0].Name())
+		}
+		if c.Children[1].Name() != "svc-two" {
+			t.Errorf("second child: want 'svc-two', got %q", c.Children[1].Name())
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
-// §6 / §8 — Validation phases and error messages
+// §7 / §9 — Validation phases and error messages
 // ---------------------------------------------------------------------------
 
-func TestBuild_Section6_ValidationPhases(t *testing.T) {
+func TestBuild_Section7_ValidationPhases(t *testing.T) {
 	t.Run("phase=raw error includes phase label, path, and reason", func(t *testing.T) {
 		yml := `
 - name: broken
@@ -994,6 +1605,39 @@ func TestBuild_Section6_ValidationPhases(t *testing.T) {
 		requireBuildErr(t, yml, "phase=expand", "path=stack")
 	})
 
+	t.Run("phase=expand: missing param includes param name", func(t *testing.T) {
+		yml := `
+types:
+  t:
+    params:
+      x: ~
+    command: echo {{ .x }}
+nodes:
+  - name: n
+    uses:
+      - t
+`
+		requireBuildErr(t, yml, "phase=expand", "missing required param", "x")
+	})
+
+	t.Run("phase=expand: unknown param includes param name", func(t *testing.T) {
+		yml := `
+types:
+  t:
+    params:
+      x: ~
+    command: echo {{ .x }}
+nodes:
+  - name: n
+    uses:
+      - t
+    with:
+      x: hello
+      y: oops
+`
+		requireBuildErr(t, yml, "phase=expand", "unknown param", "y")
+	})
+
 	t.Run("phase=runtime error includes phase label and path", func(t *testing.T) {
 		yml := `
 types:
@@ -1009,9 +1653,7 @@ nodes:
 		requireBuildErr(t, yml, "phase=runtime", "path=x")
 	})
 
-	t.Run("phase=runtime: empty top-level list → error with path=<root>", func(t *testing.T) {
-		// Produce an empty nodes list via BuildFromDocuments to trigger the runtime error path.
-		// Note: Build() catches this earlier; we use BuildFromDocuments here for completeness.
+	t.Run("phase=parse: empty top-level list → error", func(t *testing.T) {
 		_, err := BuildFromDocuments(Document{Nodes: nil})
 		if err == nil {
 			t.Fatal("expected error")
@@ -1022,7 +1664,6 @@ nodes:
 	})
 
 	t.Run("raw validation runs before expansion: raw error not masked by expand", func(t *testing.T) {
-		// command + uses would fail at raw phase before even attempting expansion
 		yml := `
 - name: node
   command: go build
@@ -1034,10 +1675,10 @@ nodes:
 }
 
 // ---------------------------------------------------------------------------
-// §9 — Determinism
+// §10 — Determinism
 // ---------------------------------------------------------------------------
 
-func TestBuild_Section9_Determinism(t *testing.T) {
+func TestBuild_Section10_Determinism(t *testing.T) {
 	t.Run("same YAML input produces identical runtime tree structure", func(t *testing.T) {
 		yml := `
 types:
@@ -1064,21 +1705,25 @@ nodes:
 		}
 	})
 
-	t.Run("determinism with cwd and env in type definition", func(t *testing.T) {
+	t.Run("determinism with params and templates", func(t *testing.T) {
 		yml := `
 types:
-  build-type:
-    name: b
-    command: go build ./...
-    cwd: ./src
-    env:
-      GOFLAGS: "-mod=vendor"
-      FOO: bar
+  docker-compose:
+    params:
+      file: ~
+      profile: dev
+    children:
+      - name: up
+        command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+      - name: stop
+        command: docker compose -f {{ .file }} stop
 
 nodes:
   - name: stack
     uses:
-      - build-type
+      - docker-compose
+    with:
+      file: docker-compose.yml
 `
 		root1 := requireBuildOK(t, yml)
 		root2 := requireBuildOK(t, yml)
@@ -1086,7 +1731,7 @@ nodes:
 		snap1 := snapshotTree(root1)
 		snap2 := snapshotTree(root2)
 		if snap1 != snap2 {
-			t.Fatalf("non-deterministic output with cwd/env:\n--- run1 ---\n%s\n--- run2 ---\n%s", snap1, snap2)
+			t.Fatalf("non-deterministic output:\n--- run1 ---\n%s\n--- run2 ---\n%s", snap1, snap2)
 		}
 	})
 
@@ -1323,20 +1968,24 @@ nodes:
 }
 
 // ---------------------------------------------------------------------------
-// §2.1 — Full document form end-to-end (spec example)
+// §11 — Full spec examples end-to-end
 // ---------------------------------------------------------------------------
 
-func TestBuild_SpecExample_FullDocumentForm(t *testing.T) {
-	// Reproduces the exact example from §2.1 of the spec.
+func TestBuild_SpecExample_ParameterisedDockerCompose(t *testing.T) {
+	// Reproduces the parameterised docker-compose example from §11 of the spec.
 	yml := `
 types:
   docker-compose:
-    name: compose
+    params:
+      file: ~
+      profile: dev
     children:
-      - name: up
-        command: docker compose up -d
-      - name: down
-        command: docker compose down
+      - name: lifecycle
+        children:
+          - name: up
+            command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+          - name: stop
+            command: docker compose -f {{ .file }} stop
 
 nodes:
   - name: app
@@ -1350,6 +1999,8 @@ nodes:
       - name: stack
         uses:
           - docker-compose
+        with:
+          file: docker-compose.yml
   - name: frontend
     command: npm run dev
 `
@@ -1364,14 +2015,55 @@ nodes:
 	requireRunnable(t, backend.Children[0], "build", "go build ./...")
 	requireRunnable(t, backend.Children[1], "test", "go test ./...")
 
-	stack := requireContainer(t, app.Children[1], "stack", 2)
-	if stack.Name() == "compose" {
-		t.Error("stack name must not be the type root name 'compose'")
-	}
-	requireRunnable(t, stack.Children[0], "up", "docker compose up -d")
-	requireRunnable(t, stack.Children[1], "down", "docker compose down")
+	// stack must use abstract node name, not type root name
+	stack := requireContainer(t, app.Children[1], "stack", 1)
+	lifecycle := requireContainer(t, stack.Children[0], "lifecycle", 2)
+	requireRunnable(t, lifecycle.Children[0], "up",
+		"docker compose -f docker-compose.yml --profile dev up -d")
+	requireRunnable(t, lifecycle.Children[1], "stop",
+		"docker compose -f docker-compose.yml stop")
 
 	requireRunnable(t, root.Children[1], "frontend", "npm run dev")
+}
+
+func TestBuild_SpecExample_NestedParameterisedTypes(t *testing.T) {
+	// Reproduces the full-stack nested parameterised types example from §11.
+	// Note: param names used in {{ .name }} templates must be valid Go
+	// identifiers — underscores instead of hyphens.
+	yml := `
+types:
+  docker-compose:
+    params:
+      file: ~
+    command: docker compose -f {{ .file }} up -d
+
+  full-stack:
+    params:
+      compose_file: ~
+      k8s_namespace: staging
+    children:
+      - name: docker
+        uses:
+          - docker-compose
+        with:
+          file: "{{ .compose_file }}"
+      - name: k8s
+        command: kubectl apply -n {{ .k8s_namespace }}
+
+nodes:
+  - name: prod
+    uses:
+      - full-stack
+    with:
+      compose_file: docker-compose.prod.yml
+      k8s_namespace: production
+`
+	root := requireBuildOK(t, yml)
+	c := requireContainer(t, root.Children[0], "prod", 2)
+	requireRunnable(t, c.Children[0], "docker",
+		"docker compose -f docker-compose.prod.yml up -d")
+	requireRunnable(t, c.Children[1], "k8s",
+		"kubectl apply -n production")
 }
 
 // ---------------------------------------------------------------------------

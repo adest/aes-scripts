@@ -21,7 +21,15 @@ func expandRoot(nodes []RawNode, reg *Registry) (*Container, error) {
 
 // expandNode recursively expands a single raw node into its runtime form.
 //
-// stack tracks the chain of type names currently being expanded for cycle detection.
+// The expansion logic handles three cases:
+//  1. Runnable: a node with a `command` — returned as-is.
+//  2. Single-use abstract: a node with exactly one entry in `uses` and no
+//     explicit children. The type is expanded and the abstract node's name
+//     overrides the type root name (§5.2).
+//  3. Container: explicit `children`, or multiple entries in `uses`, or both.
+//     Uses are expanded first (in order), then explicit children are appended.
+//
+// stack tracks type names currently being expanded for cycle detection.
 // path is the dot-separated node address used in error messages.
 func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, error) {
 	if r.Name == "" {
@@ -37,7 +45,20 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 		}
 	}
 
-	// Runnable leaf.
+	// Validate PerType with entries now, before branching on single vs
+	// multi-use, so the check applies to both cases.
+	if r.With != nil {
+		for _, tw := range r.With.PerType {
+			if !containsString(r.Uses, tw.Type) {
+				return nil, fmt.Errorf(
+					"phase=expand path=%s: 'with' list references type %q which is not in uses",
+					path, tw.Type,
+				)
+			}
+		}
+	}
+
+	// --- Runnable leaf ---
 	if r.Command != nil {
 		var cwd string
 		if r.Cwd != nil {
@@ -51,42 +72,87 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 		}, nil
 	}
 
-	// Single-use abstract node: the node takes the shape of the expanded type directly.
-	// The abstract node's own name overrides the type root name (§4.2).
+	// --- Single-use abstract node ---
+	// When Uses has exactly one type and no explicit children, the node adopts
+	// the full shape of the expanded type. The abstract node's own name takes
+	// priority over the type root name (§5.2).
 	if len(r.Uses) == 1 && len(r.Children) == 0 {
 		t := r.Uses[0]
-		raw, ok := reg.Get(t)
+		typeDef, ok := reg.Get(t)
 		if !ok {
 			return nil, fmt.Errorf("phase=expand path=%s: %w: %s", path, ErrUnknownType, t)
 		}
-		expanded, err := expandNode(raw, reg, withType(stack, t), path)
+
+		// Resolve params: validate caller params, apply defaults.
+		params, err := resolveParams(typeDef.Params, r.With, t)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("phase=expand path=%s: %w", path, err)
 		}
-		// Adopt the abstract node's name onto the expanded node.
-		setNodeName(expanded, r.Name)
-		return expanded, nil
+
+		// Substitute {{ .paramName }} in all string fields of the type body.
+		substituted, err := applyTemplates(typeDef.Body, params)
+		if err != nil {
+			return nil, fmt.Errorf("phase=expand path=%s: template: %w", path, err)
+		}
+
+		// §5.2: The abstract node's name always takes priority.
+		// Setting it here (before recursing) also handles type bodies that
+		// declare no name — expandNode requires a non-empty name.
+		substituted.Name = r.Name
+
+		return expandNode(substituted, reg, withType(stack, t), path)
 	}
 
-	// Container: collects children from uses (in order) then explicit children.
+	// --- Container: multi-use and/or explicit children ---
+
 	container := &Container{NodeName: r.Name}
 
+	// When the same type appears more than once in Uses (e.g. two independent
+	// service instances), consecutive PerType entries for that type must be
+	// consumed in order rather than always picking the first match.
+	// typeOccurrence tracks how many times each type has been processed so far.
+	typeOccurrence := map[string]int{}
+
+	// Expand each type in Uses order, applying params and templates.
 	for _, t := range r.Uses {
-		raw, ok := reg.Get(t)
+		typeDef, ok := reg.Get(t)
 		if !ok {
 			return nil, fmt.Errorf("phase=expand path=%s: %w: %s", path, ErrUnknownType, t)
 		}
-		childPath := joinPath(path, raw.Name)
-		if raw.Name == "" {
-			childPath = joinPath(path, "<type>")
+
+		// For PerType with, consume entries in declaration order so that the
+		// same type can appear in Uses multiple times with distinct params.
+		// extractNthCallerParams finds the n-th PerType entry for this type.
+		occurrence := typeOccurrence[t]
+		typeOccurrence[t]++
+		callerParams := extractNthCallerParams(r.With, t, occurrence)
+		params, err := applyParamDefs(typeDef.Params, callerParams)
+		if err != nil {
+			return nil, fmt.Errorf("phase=expand path=%s: %w", path, err)
 		}
-		child, err := expandNode(raw, reg, withType(stack, t), childPath)
+
+		substituted, err := applyTemplates(typeDef.Body, params)
+		if err != nil {
+			return nil, fmt.Errorf("phase=expand path=%s: template: %w", path, err)
+		}
+
+		// If the type body declares no name (and no template produced one),
+		// fall back to the type name itself so expandNode doesn't reject it.
+		if substituted.Name == "" {
+			substituted.Name = t
+		}
+
+		// Use the substituted name (after template resolution) for the child path.
+		childPath := joinPath(path, substituted.Name)
+
+		child, err := expandNode(substituted, reg, withType(stack, t), childPath)
 		if err != nil {
 			return nil, err
 		}
 		container.Children = append(container.Children, child)
 	}
 
+	// Append explicit children after uses-derived children.
 	for _, c := range r.Children {
 		childPath := joinPath(path, c.Name)
 		if c.Name == "" {
@@ -100,6 +166,7 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 	}
 
 	// Reject duplicate sibling names produced by expansion.
+	// Names are checked on their resolved (post-template) values.
 	seen := map[string]struct{}{}
 	for _, child := range container.Children {
 		if _, exists := seen[child.Name()]; exists {
@@ -135,4 +202,14 @@ func joinPath(parent, child string) string {
 		return parent
 	}
 	return parent + "." + child
+}
+
+// containsString reports whether slice contains s.
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

@@ -8,4 +8,6 @@ var (
 	ErrCycleDetected     = errors.New("cycle detected")
 	ErrDuplicateChild    = errors.New("duplicate child name")
 	ErrInvalidNode       = errors.New("invalid node definition")
+	ErrMissingParam      = errors.New("missing required param")
+	ErrUnknownParam      = errors.New("unknown param")
 )

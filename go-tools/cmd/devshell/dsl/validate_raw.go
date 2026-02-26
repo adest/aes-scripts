@@ -21,7 +21,7 @@ func validateRawTree(nodes []RawNode) error {
 }
 
 // validateRawNode validates a single raw node: name presence, XOR rule, content
-// constraints, sibling uniqueness, and recursive child validation.
+// constraints, `with` validity, sibling uniqueness, and recursive child validation.
 func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error {
 	if n.Name == "" {
 		return fmt.Errorf("phase=raw path=%s: node is missing a name", path)
@@ -52,6 +52,20 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 		// valid, fall through to content checks
 	default:
 		return fmt.Errorf("phase=raw path=%s: node cannot combine command, children and uses", path)
+	}
+
+	// `with` is only valid on abstract nodes (nodes that have `uses`).
+	if n.With != nil && !hasUses {
+		return fmt.Errorf("phase=raw path=%s: 'with' can only be used on abstract nodes (requires 'uses')", path)
+	}
+
+	// In list form, each entry must declare a non-empty `type`.
+	if n.With != nil {
+		for _, tw := range n.With.PerType {
+			if tw.Type == "" {
+				return fmt.Errorf("phase=raw path=%s: 'with' list item is missing 'type'", path)
+			}
+		}
 	}
 
 	switch {

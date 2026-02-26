@@ -27,12 +27,13 @@ func executePipeline(p *dsl.Pipeline) error {
 
 	for i, step := range p.Steps {
 		if err := runStepWithPolicy(step, captures); err != nil {
-			// Use the step ID in the error message when available.
+			// Always include the index; append the id when present.
+			// e.g. "step [1]" or "step [1] (list)"
 			label := fmt.Sprintf("[%d]", i)
 			if step.ID != "" {
-				label = step.ID
+				label = fmt.Sprintf("[%d] (%s)", i, step.ID)
 			}
-			return fmt.Errorf("step %s: %w", label, err)
+			return fmt.Errorf("pipeline %q: step %s: %w", p.NodeName, label, err)
 		}
 	}
 	return nil

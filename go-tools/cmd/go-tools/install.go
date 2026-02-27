@@ -95,12 +95,12 @@ func runInstall(_ *cobra.Command, _ []string, all bool, noCompletions bool) erro
 	shell := detectShell()
 	if shell == nil {
 		fmt.Println("⚠️  Could not detect shell from $SHELL — skipping completion generation.")
-		fmt.Println("   Run 'go-tools completions install' manually.")
+		fmt.Println("   Run 'go-tools completions refresh' manually.")
 		fmt.Println("✗ Completions not generated.")
 		return nil
 	}
 
-	res, err := installCompletionsForShell(*shell)
+	res, err := refreshCompletionsForShell(*shell)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: completion generation failed: %v\n", err)
 		fmt.Println("❌ Complétions non générées.")

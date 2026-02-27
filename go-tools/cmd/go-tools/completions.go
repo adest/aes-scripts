@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -21,10 +22,16 @@ const completionsMarkerEnd = "# <<< go-tools completions <<<"
 type shellDef struct {
 	name           string
 	configFilePath string
-	// setupBlock returns the lines to add between the markers.
-	setupBlock func(completionsDir string) string
 	// fileName returns the completion file name for a given tool.
 	fileName func(tool string) string
+	// setupBlock returns the config lines to append when no framework is detected.
+	// It receives the completions directory path.
+	setupBlock func(dir string) string
+	// frameworkPatterns lists source-line patterns that identify a known shell
+	// framework (e.g. oh-my-zsh). When one is found in the config file,
+	// setupBlockFramework is inserted before it instead of appending setupBlock.
+	frameworkPatterns   []string
+	setupBlockFramework func(dir string) string
 }
 
 func allShells() []shellDef {
@@ -33,26 +40,36 @@ func allShells() []shellDef {
 		{
 			name:           "zsh",
 			configFilePath: filepath.Join(home, ".zshrc"),
+			fileName:       func(tool string) string { return "_" + tool },
 			setupBlock: func(dir string) string {
 				return "fpath=(" + dir + " $fpath)\nautoload -U compinit && compinit"
 			},
-			fileName: func(tool string) string { return "_" + tool },
+			frameworkPatterns: []string{
+				`source $ZSH/oh-my-zsh.sh`,
+				`source "$ZSH/oh-my-zsh.sh"`,
+				`. $ZSH/oh-my-zsh.sh`,
+				`source $ZDOTDIR/oh-my-zsh.sh`,
+			},
+			// Framework (oh-my-zsh) calls compinit itself — only fpath is needed.
+			setupBlockFramework: func(dir string) string {
+				return "fpath=(" + dir + " $fpath)"
+			},
 		},
 		{
 			name:           "bash",
 			configFilePath: filepath.Join(home, ".bashrc"),
+			fileName:       func(tool string) string { return tool },
 			setupBlock: func(dir string) string {
 				return `for f in ` + dir + `/*; do [ -f "$f" ] && source "$f"; done`
 			},
-			fileName: func(tool string) string { return tool },
 		},
 		{
 			name:           "fish",
 			configFilePath: filepath.Join(home, ".config", "fish", "config.fish"),
+			fileName:       func(tool string) string { return tool + ".fish" },
 			setupBlock: func(dir string) string {
 				return "for f in " + dir + "/*.fish; source $f; end"
 			},
-			fileName: func(tool string) string { return tool + ".fish" },
 		},
 	}
 }
@@ -118,12 +135,7 @@ type completionInstallResult struct {
 }
 
 func isSkipped(name string) bool {
-	for _, e := range completionExcludeList {
-		if e == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(completionExcludeList, name)
 }
 
 // installCompletionsForShell generates and writes completion scripts for all
@@ -192,14 +204,36 @@ func isShellConfigured(shell shellDef) (bool, error) {
 	return false, scanner.Err()
 }
 
-// configureShell appends the go-tools completions block to the shell config file.
+// configureShell writes the go-tools completions block to the shell config file.
+//
+// For shells with framework patterns (zsh + oh-my-zsh): inserts a fpath-only
+// block just before the framework source line so the framework's compinit picks
+// it up. Falls back to appending if no framework line is found.
+//
+// For other shells: appends fpath + compinit at the end of the config file.
 func configureShell(shell shellDef) error {
 	compDir := completionsDirFor(shell.name)
-	block := completionsMarkerBegin + "\n" + shell.setupBlock(compDir) + "\n" + completionsMarkerEnd + "\n"
 
 	if err := os.MkdirAll(filepath.Dir(shell.configFilePath), 0755); err != nil {
 		return err
 	}
+
+	if len(shell.frameworkPatterns) > 0 {
+		content, err := os.ReadFile(shell.configFilePath)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		lines := strings.Split(string(content), "\n")
+		for _, pattern := range shell.frameworkPatterns {
+			if idx := findLine(lines, pattern); idx >= 0 {
+				block := completionsMarkerBegin + "\n" + shell.setupBlockFramework(compDir) + "\n" + completionsMarkerEnd
+				return writeWithInsert(shell.configFilePath, lines, idx, block)
+			}
+		}
+	}
+
+	// Default: append fpath + compinit at end of file.
+	block := completionsMarkerBegin + "\n" + shell.setupBlock(compDir) + "\n" + completionsMarkerEnd + "\n"
 	f, err := os.OpenFile(shell.configFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -207,6 +241,25 @@ func configureShell(shell shellDef) error {
 	defer f.Close()
 	_, err = f.WriteString("\n" + block)
 	return err
+}
+
+// findLine returns the index of the first line matching pattern (trimmed), or -1.
+func findLine(lines []string, pattern string) int {
+	for i, line := range lines {
+		if strings.TrimSpace(line) == strings.TrimSpace(pattern) {
+			return i
+		}
+	}
+	return -1
+}
+
+// writeWithInsert writes lines to path with block inserted before the line at idx.
+func writeWithInsert(path string, lines []string, idx int, block string) error {
+	out := make([]string, 0, len(lines)+2)
+	out = append(out, lines[:idx]...)
+	out = append(out, block, "")
+	out = append(out, lines[idx:]...)
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
 
 // unconfigureShell removes the go-tools completions block from the shell config file.
@@ -223,15 +276,12 @@ func unconfigureShell(shell shellDef) error {
 	var result []string
 	inBlock := false
 	for _, line := range lines {
-		if strings.Contains(line, completionsMarkerBegin) {
+		switch {
+		case strings.Contains(line, completionsMarkerBegin):
 			inBlock = true
-			continue
-		}
-		if strings.Contains(line, completionsMarkerEnd) {
+		case strings.Contains(line, completionsMarkerEnd):
 			inBlock = false
-			continue
-		}
-		if !inBlock {
+		case !inBlock:
 			result = append(result, line)
 		}
 	}
@@ -245,34 +295,43 @@ func newCompletionsCommand() *cobra.Command {
 		Use:   "completions",
 		Short: "Manage shell completions for go-tools",
 	}
-	cmd.AddCommand(newCompletionsInstallCommand())
+	cmd.AddCommand(newCompletionsRefreshCommand())
 	cmd.AddCommand(newCompletionsSetupCommand())
 	cmd.AddCommand(newCompletionsStatusCommand())
 	cmd.AddCommand(newCompletionsCleanCommand())
 	return cmd
 }
 
-func newCompletionsInstallCommand() *cobra.Command {
+func newCompletionsRefreshCommand() *cobra.Command {
 	var shellFlag string
 	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Generate and write completion scripts for the current shell",
+		Use:   "refresh",
+		Short: "Clean and regenerate completion scripts for the current shell",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCompletionsInstall(shellFlag)
+			return runCompletionsRefresh(shellFlag)
 		},
 	}
-	cmd.Flags().StringVar(&shellFlag, "shell", "", "Shell to install completions for (default: auto-detect)")
+	cmd.Flags().StringVar(&shellFlag, "shell", "", "Shell to refresh completions for (default: auto-detect)")
 	return cmd
 }
 
-func runCompletionsInstall(shellName string) error {
+// refreshCompletionsForShell cleans then regenerates completion scripts.
+// It is the canonical operation: always produces a clean, up-to-date state.
+func refreshCompletionsForShell(shell shellDef) (completionInstallResult, error) {
+	if err := os.RemoveAll(completionsDirFor(shell.name)); err != nil && !os.IsNotExist(err) {
+		return completionInstallResult{}, err
+	}
+	return installCompletionsForShell(shell)
+}
+
+func runCompletionsRefresh(shellName string) error {
 	shell, err := resolveShell(shellName)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("→ Generating completions for %s\n", shell.name)
-	res, err := installCompletionsForShell(*shell)
+	fmt.Printf("→ Refreshing completions for %s\n", shell.name)
+	res, err := refreshCompletionsForShell(*shell)
 	if err != nil {
 		return err
 	}
@@ -292,24 +351,12 @@ func runCompletionsInstall(shellName string) error {
 
 func printCompletionResult(res completionInstallResult) {
 	statusPad := 12
-	// Compute max tool name length for perfect alignment
 	maxNameLen := 0
-	for _, t := range res.installed {
+	for _, t := range append(append(res.installed, res.skipped...), res.failed...) {
 		if len(t) > maxNameLen {
 			maxNameLen = len(t)
 		}
 	}
-	for _, t := range res.skipped {
-		if len(t) > maxNameLen {
-			maxNameLen = len(t)
-		}
-	}
-	for _, t := range res.failed {
-		if len(t) > maxNameLen {
-			maxNameLen = len(t)
-		}
-	}
-	// Print all tools in a single list, with icon, status, and aligned name
 	for _, t := range res.installed {
 		fmt.Printf("   ✓  %-*s  %*s\n", statusPad-2, "generated", maxNameLen, t)
 	}

@@ -14,6 +14,7 @@ import (
 func main() {
 	var flagFiles []string
 	var flagRegistryDirs []string
+	var flagDryRun bool
 
 	rootCmd := &cobra.Command{
 		Use:               appName + " [command ...]",
@@ -36,8 +37,16 @@ func main() {
 			}
 			switch n := node.(type) {
 			case *dsl.Runnable:
+				if flagDryRun {
+					dryRunRunnable(n, extraArgs)
+					return nil
+				}
 				return execute(n, extraArgs)
 			case *dsl.Pipeline:
+				if flagDryRun {
+					dryRunPipeline(n)
+					return nil
+				}
 				return executePipeline(n)
 			default:
 				return fmt.Errorf("unexpected node type %T", node)
@@ -49,6 +58,8 @@ func main() {
 		"node YAML file (repeatable; default: ~/.config/"+appName+"/nodes/*.yml)")
 	rootCmd.Flags().StringArrayVar(&flagRegistryDirs, "registry-dir", nil,
 		"additional registry directory to scan for type files (repeatable)")
+	rootCmd.Flags().BoolVar(&flagDryRun, "dry-run", false,
+		"print what would be executed without running anything")
 
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true

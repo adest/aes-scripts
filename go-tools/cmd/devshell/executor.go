@@ -13,6 +13,29 @@ import (
 	"go-tools/cmd/devshell/dsl"
 )
 
+// execute runs a Runnable with its configured cwd and env.
+// Extra args are appended to the argv. No implicit shell is used.
+func execute(r *dsl.Runnable, extraArgs []string) error {
+	argv := append(append([]string(nil), r.Argv...), extraArgs...)
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+
+	if r.Cwd != "" {
+		cmd.Dir = r.Cwd
+	}
+
+	// Inherit the current environment and overlay with node-specific variables.
+	cmd.Env = os.Environ()
+	for k, v := range r.Env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+
+	return cmd.Run()
+}
+
 // stepRefRunRe matches {{ steps.<id>.<stream> }} patterns at runtime.
 // These are resolved by substituting the captured output of the named step.
 var stepRefRunRe = regexp.MustCompile(`\{\{\s*steps\.([A-Za-z0-9_][A-Za-z0-9_-]*)\.(\w+)\s*\}\}`)

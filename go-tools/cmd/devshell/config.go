@@ -99,6 +99,20 @@ func splitColon(s string) []string {
 	return out
 }
 
+// load resolves config from flags and builds the runtime tree.
+func load(flagFiles, flagRegistryDirs []string) (*dsl.Container, error) {
+	configDir, err := resolveConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	registryDirs := resolveRegistryDirs(configDir, flagRegistryDirs)
+	nodeFiles, err := resolveNodeFiles(configDir, flagFiles)
+	if err != nil {
+		return nil, err
+	}
+	return loadSources(registryDirs, nodeFiles)
+}
+
 // loadSources reads all registry and node files and builds the runtime tree.
 // Registry files are loaded first so their types are available to all node files.
 func loadSources(registryDirs, nodeFiles []string) (*dsl.Container, error) {

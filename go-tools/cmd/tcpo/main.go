@@ -22,6 +22,15 @@ var rootCmd = &cobra.Command{
 	Long: `tcpo liste les ports en écoute (TCP par défaut) et permet de kill
 les processus associés via une interface interactive.`,
 	RunE: run,
+	// tcpo takes no positional arguments, only flags.
+	// Inject "--" when the cursor is empty so Cobra triggers its native flag
+	// completion instead of falling back to file completion.
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 && toComplete == "" {
+			return []string{"--"}, cobra.ShellCompDirectiveNoSpace | cobra.ShellCompDirectiveNoFileComp
+		}
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	},
 }
 
 func init() {

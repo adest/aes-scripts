@@ -1,0 +1,267 @@
+# devshell example configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# This file documents every feature of the devshell DSL.
+# Run it with:  devshell --file <this-file> <command>
+# Preview it with:  devshell --file <this-file> --dry-run <command>
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── TYPE DEFINITIONS ────────────────────────────────────────────────────────
+# Types are reusable templates referenced via `uses`.
+# A param declared as `~` (null) is required; a scalar value sets a default.
+
+types:
+
+  # ── Simple runnable type ──────────────────────────────────────────────────
+  # Demonstrates: required param, optional param with default, template substitution.
+  greeter:
+    name: "greet-{{ .name }}"  # fallback child name in multi-type expansion
+    params:
+      name: ~            # required — caller must supply a value
+      greeting: hello    # optional — defaults to "hello"
+    command: echo {{ .greeting }} {{ .name }}
+
+  # ── Container type ────────────────────────────────────────────────────────
+  # Demonstrates: type that expands into multiple named children.
+  lifecycle:
+    name: "lifecycle-{{ .subject }}"  # fallback child name in multi-type expansion
+    params:
+      subject: ~
+    children:
+      - name: start
+        command: echo starting {{ .subject }}
+      - name: stop
+        command: echo stopped {{ .subject }}
+
+  # ── Pipeline type ─────────────────────────────────────────────────────────
+  # Demonstrates: type that expands into a pipeline with capture and injection.
+  list-and-count:
+    params:
+      path: /tmp
+    steps:
+      - id: listing
+        command: ls
+        args:
+          - "{{ .path }}"
+        capture: stdout
+        tee: true          # stream to terminal AND buffer for later steps
+      - command: echo
+        args:
+          - "done listing {{ .path }}"
+
+  # ── Nested type ───────────────────────────────────────────────────────────
+  # Demonstrates: a type whose body itself uses other types (recursive expansion).
+  double-greet:
+    params:
+      first: ~
+      second: ~
+    children:
+      - name: greet-first
+        uses: greeter
+        with:
+          name: "{{ .first }}"
+      - name: greet-second
+        uses: greeter
+        with:
+          name: "{{ .second }}"
+          greeting: hey
+
+
+# ─── NODES ───────────────────────────────────────────────────────────────────
+
+nodes:
+
+  # ── RUNNABLE: compact string form ────────────────────────────────────────
+  # The string is split into argv by whitespace — no shell, no quoting.
+  - name: hello
+    command: echo hello world
+
+  # ── RUNNABLE: array form ─────────────────────────────────────────────────
+  # Tokens are already split — useful when an argument contains whitespace.
+  - name: date
+    command: [date, "+%Y-%m-%d %H:%M:%S"]
+
+  # ── RUNNABLE: long form (`command` + `args`) ──────────────────────────────
+  # `command` is the executable token; `args` provides the rest.
+  # Only valid when `command` is a single token (no whitespace).
+  - name: list-tmp
+    command: ls
+    args:
+      - "-la"
+      - /tmp
+
+  # ── RUNNABLE: with cwd and env ────────────────────────────────────────────
+  # `cwd` sets the working directory; `env` overlays environment variables.
+  - name: greet-env
+    command: printenv GREETING
+    cwd: /tmp
+    env:
+      GREETING: hello from env
+
+  # ── CONTAINER ─────────────────────────────────────────────────────────────
+  # Groups related commands under a common prefix (not itself executable).
+  - name: system
+    children:
+      - name: whoami
+        command: whoami
+      - name: hostname
+        command: hostname
+      - name: uptime
+        command: uptime
+      - name: nested
+        children:
+          - name: uname
+            command: uname -a
+          - name: arch
+            command: uname -m
+
+  # ── ABSTRACT NODE: single type, required param ────────────────────────────
+  - name: greet-world
+    uses: greeter
+    with:
+      name: world
+
+  # ── ABSTRACT NODE: single type, override optional param ───────────────────
+  - name: greet-alice
+    uses: greeter
+    with:
+      name: alice
+      greeting: hi
+
+  # ── ABSTRACT NODE: type that expands into a container ─────────────────────
+  - name: myapp
+    uses: lifecycle
+    with:
+      subject: myapp
+
+  # ── ABSTRACT NODE: multi-type with per-type params ────────────────────────
+  # Each `with` entry targets a specific type by name.
+  - name: multi-demo
+    uses:
+      - greeter
+      - lifecycle
+    with:
+      - type: greeter
+        name: team
+        greeting: welcome
+      - type: lifecycle
+        subject: deployment
+
+  # ── ABSTRACT NODE: nested type (type that uses other types) ───────────────
+  - name: introductions
+    uses: double-greet
+    with:
+      first: alice
+      second: bob
+
+  # ── PIPELINE: simple sequential steps ────────────────────────────────────
+  # Execution is fail-fast by default: first failing step stops the pipeline.
+  - name: steps-demo
+    steps:
+      - command: echo step one
+      - command: echo step two
+      - command: echo step three
+
+  # ── PIPELINE: capture stdout, inject into later step's args ───────────────
+  # `id` names the step; `capture` buffers its output; `{{ steps.<id>.stdout }}` injects it.
+  # Step references are forbidden in string-form `command` — use `args` instead.
+  - name: capture-demo
+    steps:
+      - id: get-date
+        command: date
+        args:
+          - "+%Y-%m-%d"
+        capture: stdout
+      - command: echo
+        args:
+          - "today is:"
+          - "{{ steps.get-date.stdout }}"
+
+  # ── PIPELINE: capture stderr ──────────────────────────────────────────────
+  - name: capture-stderr-demo
+    steps:
+      - id: check
+        command: ls
+        args:
+          - /tmp
+        capture: stderr
+      - command: echo
+        args:
+          - "stderr was:"
+          - "{{ steps.check.stderr }}"
+
+  # ── PIPELINE: capture both stdout and stderr ──────────────────────────────
+  - name: capture-both-demo
+    steps:
+      - id: info
+        command: ls
+        args:
+          - /tmp
+        capture: both
+      - command: echo
+        args:
+          - "out:"
+          - "{{ steps.info.stdout }}"
+
+  # ── PIPELINE: tee — capture AND stream to terminal simultaneously ─────────
+  - name: tee-demo
+    steps:
+      - id: who
+        command: whoami
+        capture: stdout
+        tee: true          # output reaches the terminal AND the buffer
+      - command: echo
+        args:
+          - "running as:"
+          - "{{ steps.who.stdout }}"
+
+  # ── PIPELINE: stdin piping between steps ─────────────────────────────────
+  # `stdin` feeds the buffered output of a prior step as process stdin.
+  - name: pipe-demo
+    steps:
+      - id: list
+        command: ls
+        args:
+          - /tmp
+        capture: stdout
+      - command: wc
+        args:
+          - "-l"
+        stdin: steps.list.stdout    # pipe the listing into wc -l
+
+  # ── PIPELINE: inject step output into cwd and env ─────────────────────────
+  - name: inject-demo
+    steps:
+      - id: dir
+        command: echo
+        args:
+          - /tmp
+        capture: stdout
+      - command: ls
+        cwd: "{{ steps.dir.stdout }}"
+        env:
+          WORK_DIR: "{{ steps.dir.stdout }}"
+
+  # ── PIPELINE: on-fail continue ────────────────────────────────────────────
+  # The step's failure is recorded but execution continues to the next step.
+  - name: continue-demo
+    steps:
+      - command: echo cleanup
+        on-fail: continue    # tolerate failure and proceed
+      - command: echo main task
+
+  # ── PIPELINE: on-fail retry ───────────────────────────────────────────────
+  # The step is retried up to `attempts` times total, with `delay` between each try.
+  - name: retry-demo
+    steps:
+      - command: echo attempt
+        on-fail:
+          action: retry
+          attempts: 3    # total executions including the first (minimum: 2)
+          delay: 1s      # wait between attempts (Go duration: 1s, 500ms, 1m30s, …)
+      - command: echo done
+
+  # ── ABSTRACT NODE: pipeline type with params ──────────────────────────────
+  - name: check-tmp
+    uses: list-and-count
+    with:
+      path: /tmp

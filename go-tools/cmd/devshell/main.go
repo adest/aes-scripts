@@ -14,10 +14,11 @@ var (
 
 func main() {
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(exampleCmd)
 
-	rootCmd.Flags().StringArrayVarP(&flagFiles, "file", "f", nil,
+	rootCmd.PersistentFlags().StringArrayVarP(&flagFiles, "file", "f", nil,
 		"node YAML file (repeatable; default: ~/.config/"+appName+"/nodes/*.yml)")
-	rootCmd.Flags().StringArrayVar(&flagRegistryDirs, "registry-dir", nil,
+	rootCmd.PersistentFlags().StringArrayVar(&flagRegistryDirs, "registry-dir", nil,
 		"additional registry directory to scan for type files (repeatable)")
 	rootCmd.Flags().BoolVar(&flagDryRun, "dry-run", false,
 		"print what would be executed without running anything")

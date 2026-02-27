@@ -13,6 +13,7 @@ type appState int
 
 const (
 	stateList appState = iota
+	stateSearch
 	stateConfirm
 	stateResult
 )
@@ -52,15 +53,26 @@ var (
 	styleErr = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("196")).
 		Padding(0, 1)
+
+	styleSearch = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("229")).
+			Padding(0, 1)
+
+	styleSearchPrompt = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("214")).
+				Padding(0, 1)
 )
 
 type model struct {
-	table       table.Model
-	connections []ConnectionInfo
-	proto       string
-	state       appState
-	resultMsg   string
-	resultErr   error
+	table         table.Model
+	connections   []ConnectionInfo
+	filteredConns []ConnectionInfo
+	proto         string
+	state         appState
+	searchQuery   string
+	resultMsg     string
+	resultErr     error
 }
 
 func newModel(connections []ConnectionInfo, proto string) model {
@@ -92,10 +104,11 @@ func newModel(connections []ConnectionInfo, proto string) model {
 	t.SetStyles(s)
 
 	return model{
-		table:       t,
-		connections: connections,
-		proto:       proto,
-		state:       stateList,
+		table:         t,
+		connections:   connections,
+		filteredConns: connections,
+		proto:         proto,
+		state:         stateList,
 	}
 }
 
@@ -107,6 +120,22 @@ func toRows(conns []ConnectionInfo) []table.Row {
 	return rows
 }
 
+func filterConns(conns []ConnectionInfo, query string) []ConnectionInfo {
+	if query == "" {
+		return conns
+	}
+	q := strings.ToLower(query)
+	var result []ConnectionInfo
+	for _, c := range conns {
+		if strings.Contains(strings.ToLower(c.LocalAddr), q) ||
+			strings.Contains(strings.ToLower(c.ProcessName), q) ||
+			strings.Contains(fmt.Sprintf("%d", c.Pid), q) {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
 func (m model) Init() tea.Cmd {
 	return nil
 }
@@ -115,6 +144,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.state {
 	case stateList:
 		return m.updateList(msg)
+	case stateSearch:
+		return m.updateSearch(msg)
 	case stateConfirm:
 		return m.updateConfirm(msg)
 	case stateResult:
@@ -130,7 +161,7 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "ctrl+k":
-			if len(m.connections) > 0 {
+			if len(m.filteredConns) > 0 {
 				m.state = stateConfirm
 			}
 			return m, nil
@@ -138,7 +169,48 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 			conns, err := ScanConnections(m.proto)
 			if err == nil {
 				m.connections = conns
-				m.table.SetRows(toRows(conns))
+				m.filteredConns = filterConns(conns, m.searchQuery)
+				m.table.SetRows(toRows(m.filteredConns))
+			}
+			return m, nil
+		case "/":
+			m.state = stateSearch
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	return m, cmd
+}
+
+func (m model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return m, tea.Quit
+		case "esc":
+			m.searchQuery = ""
+			m.filteredConns = m.connections
+			m.table.SetRows(toRows(m.filteredConns))
+			m.state = stateList
+			return m, nil
+		case "enter":
+			m.state = stateList
+			return m, nil
+		case "backspace":
+			if len(m.searchQuery) > 0 {
+				m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+				m.filteredConns = filterConns(m.connections, m.searchQuery)
+				m.table.SetRows(toRows(m.filteredConns))
+			}
+			return m, nil
+		default:
+			// N'accepter que les caractères imprimables
+			if len(msg.Runes) == 1 {
+				m.searchQuery += string(msg.Runes)
+				m.filteredConns = filterConns(m.connections, m.searchQuery)
+				m.table.SetRows(toRows(m.filteredConns))
 			}
 			return m, nil
 		}
@@ -154,8 +226,8 @@ func (m model) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch strings.ToLower(msg.String()) {
 		case "y":
 			idx := m.table.Cursor()
-			if idx >= 0 && idx < len(m.connections) {
-				pid := m.connections[idx].Pid
+			if idx >= 0 && idx < len(m.filteredConns) {
+				pid := m.filteredConns[idx].Pid
 				err := killProcess(pid)
 				m.resultErr = err
 				if err == nil {
@@ -184,7 +256,8 @@ func (m model) updateResult(msg tea.Msg) (tea.Model, tea.Cmd) {
 			conns, err := ScanConnections(m.proto)
 			if err == nil {
 				m.connections = conns
-				m.table.SetRows(toRows(conns))
+				m.filteredConns = filterConns(conns, m.searchQuery)
+				m.table.SetRows(toRows(m.filteredConns))
 			}
 			m.state = stateList
 			return m, nil
@@ -199,10 +272,19 @@ func (m model) View() string {
 	tableView := styleBase.Render(m.table.View())
 
 	switch m.state {
+	case stateSearch:
+		prompt := styleSearchPrompt.Render("/") + styleSearch.Render(m.searchQuery+"█")
+		var countInfo string
+		if m.searchQuery != "" {
+			countInfo = styleHelp.Render(fmt.Sprintf("  (%d/%d)", len(m.filteredConns), len(m.connections)))
+		}
+		help := styleHelp.Render("Entrée  confirmer    Échap  annuler")
+		return title + "\n" + tableView + "\n" + prompt + countInfo + "\n" + help
+
 	case stateConfirm:
 		var target string
-		if idx := m.table.Cursor(); idx >= 0 && idx < len(m.connections) {
-			c := m.connections[idx]
+		if idx := m.table.Cursor(); idx >= 0 && idx < len(m.filteredConns) {
+			c := m.filteredConns[idx]
 			target = fmt.Sprintf("%s  (PID %d)", c.ProcessName, c.Pid)
 		}
 		overlay := styleOverlay.Render(
@@ -226,8 +308,10 @@ func (m model) View() string {
 		var help string
 		if len(m.connections) == 0 {
 			help = styleHelp.Render("Aucun port en écoute.  r  rafraîchir    q  quitter")
+		} else if m.searchQuery != "" {
+			help = styleHelp.Render("↑/↓  naviguer    /  modifier filtre    Échap  effacer    ctrl+k  kill    r  rafraîchir    q  quitter")
 		} else {
-			help = styleHelp.Render("↑/↓  naviguer    ctrl+k  kill    r  rafraîchir    q  quitter")
+			help = styleHelp.Render("↑/↓  naviguer    /  filtrer    ctrl+k  kill    r  rafraîchir    q  quitter")
 		}
 		return title + "\n" + tableView + "\n" + help
 	}

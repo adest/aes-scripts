@@ -21,7 +21,7 @@ func newCleanCommand() *cobra.Command {
 }
 
 func runClean(cmd *cobra.Command, args []string, all bool) error {
-	targetDir := filepath.Join(os.Getenv("HOME"), ".local", "go-tools", "bin")
+	targetDir := goToolsBinDir()
 	fmt.Println("Deleting binaries in", targetDir)
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {

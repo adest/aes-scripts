@@ -1,0 +1,77 @@
+# devshell — quick reference
+# Run:          devshell --file <this-file> <command>
+# Full example: devshell example --full
+
+# ─── TYPE DEFINITIONS ────────────────────────────────────────────────────────
+types:
+  greeter:
+    params:
+      name: ~          # required (~ = no default)
+      greeting: hello  # optional, defaults to "hello"
+    command: echo {{ .greeting }} {{ .name }}
+
+# ─── NODES ───────────────────────────────────────────────────────────────────
+nodes:
+
+  # Runnable: simple command
+  - name: hello
+    command: echo hello world
+
+  # Runnable: with env and cwd
+  - name: greet-env
+    command: printenv GREETING
+    cwd: /tmp
+    env:
+      GREETING: hello from env
+
+  # Container: groups related commands under a common prefix
+  - name: system
+    children:
+      - name: whoami
+        command: whoami
+      - name: uptime
+        command: uptime
+
+  # Type usage
+  - name: greet-world
+    uses: greeter
+    with:
+      name: world
+      greeting: hi
+
+  # Pipeline: sequential steps
+  - name: steps-demo
+    steps:
+      - command: echo step one
+      - command: echo step two
+
+  # Pipeline: capture stdout and inject into a later step
+  - name: capture-demo
+    steps:
+      - id: get-date
+        command: date
+        args: ["+%Y-%m-%d"]
+        capture: stdout
+      - command: echo
+        args: ["today is:", "{{ steps.get-date.stdout }}"]
+
+  # Pipeline: stdin piping between steps
+  - name: pipe-demo
+    steps:
+      - id: list
+        command: ls
+        args: [/tmp]
+        capture: stdout
+      - command: wc
+        args: ["-l"]
+        stdin: steps.list.stdout
+
+  # Pipeline: on-fail retry
+  - name: retry-demo
+    steps:
+      - command: echo attempt
+        on-fail:
+          action: retry
+          attempts: 3
+          delay: 1s
+      - command: echo done

@@ -53,6 +53,8 @@ func runInstall(_ *cobra.Command, _ []string, all bool, noCompletions bool) erro
 	if err != nil {
 		return err
 	}
+	fmt.Println("\n━━━ 🔨 Tool installation ━━━")
+	success := true
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -61,53 +63,59 @@ func runInstall(_ *cobra.Command, _ []string, all bool, noCompletions bool) erro
 		if !all && name == "go-tools" {
 			continue
 		}
-		fmt.Println("→ Installing", name)
+		fmt.Printf("   → Installing %-20s\n", name)
 		install := exec.Command(
 			"go", "install",
 			"./cmd/"+name,
 		)
-		// Run from module root so the go tool can discover go.mod.
 		install.Dir = repoRoot
-		// Install into our target directory (rather than GOPATH/bin).
 		install.Env = append(os.Environ(), "GOBIN="+targetDir)
 		install.Stdout = os.Stdout
-		// Capture stderr: the go compiler emits \r-based progress lines that
-		// corrupt the terminal display. Show it only when the build fails.
 		var stderrBuf bytes.Buffer
 		install.Stderr = &stderrBuf
 		if err := install.Run(); err != nil {
 			os.Stderr.Write(stderrBuf.Bytes())
 			repro := "cd " + repoRoot + " && GOBIN=" + targetDir + " " + strings.Join(install.Args, " ")
-			return fmt.Errorf("install failed for %q\ncommand: %s\nerror: %w", name, repro, err)
+			fmt.Printf("   ✗ Installation failed for '%s'\n     command: %s\n     error: %v\n", name, repro, err)
+			success = false
 		}
 	}
-	fmt.Println("✅ Installed to", targetDir)
+	if success {
+		fmt.Printf("\n  ✅ All tools installed in %s\n", targetDir)
+	} else {
+		fmt.Printf("\n  ❌ Some tools failed to install. See above.\n")
+	}
+	fmt.Println()
 
 	if noCompletions {
 		return nil
 	}
 
-	fmt.Println()
+	fmt.Println("━━━ 🧩 Completion generation ━━━")
 	shell := detectShell()
 	if shell == nil {
 		fmt.Println("⚠️  Could not detect shell from $SHELL — skipping completion generation.")
 		fmt.Println("   Run 'go-tools completions install' manually.")
+		fmt.Println("✗ Completions not generated.")
 		return nil
 	}
 
-	fmt.Printf("→ Generating completions for %s\n", shell.name)
 	res, err := installCompletionsForShell(*shell)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: completion generation failed: %v\n", err)
+		fmt.Println("❌ Complétions non générées.")
 		return nil
 	}
 	printCompletionResult(res)
 
 	configured, _ := isShellConfigured(*shell)
 	if !configured {
-		fmt.Printf("\n⚠️  Shell not configured to source completions.\n")
-		fmt.Printf("   Run: go-tools completions setup\n")
+		fmt.Printf("\n  ❌ Completions generated but not enabled in shell (%s).\n", shell.name)
+		fmt.Printf("     Run: go-tools completions setup\n")
+	} else {
+		fmt.Printf("\n  ✅ Completions generated and enabled for %s\n", shell.name)
 	}
+	fmt.Println()
 	return nil
 }
 

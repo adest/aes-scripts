@@ -113,11 +113,11 @@ func generateCompletionForTool(binPath, shell string) ([]byte, bool) {
 // completionInstallResult holds the outcome of a completion install run.
 type completionInstallResult struct {
 	installed []string // completion generated and written
-	excluded  []string // in completionExcludeList, intentionally skipped
+	skipped   []string // in completionExcludeList, intentionally skipped
 	failed    []string // tried but got no valid completion output
 }
 
-func isExcluded(name string) bool {
+func isSkipped(name string) bool {
 	for _, e := range completionExcludeList {
 		if e == name {
 			return true
@@ -151,8 +151,8 @@ func installCompletionsForShell(shell shellDef) (completionInstallResult, error)
 		}
 		toolName := e.Name()
 
-		if isExcluded(toolName) {
-			res.excluded = append(res.excluded, toolName)
+		if isSkipped(toolName) {
+			res.skipped = append(res.skipped, toolName)
 			continue
 		}
 
@@ -291,14 +291,33 @@ func runCompletionsInstall(shellName string) error {
 }
 
 func printCompletionResult(res completionInstallResult) {
+	statusPad := 12
+	// Compute max tool name length for perfect alignment
+	maxNameLen := 0
 	for _, t := range res.installed {
-		fmt.Printf("  ✅ %s\n", t)
+		if len(t) > maxNameLen {
+			maxNameLen = len(t)
+		}
 	}
-	for _, t := range res.excluded {
-		fmt.Printf("  —  %s (excluded)\n", t)
+	for _, t := range res.skipped {
+		if len(t) > maxNameLen {
+			maxNameLen = len(t)
+		}
 	}
 	for _, t := range res.failed {
-		fmt.Printf("  ⚠️  %s (no completion support)\n", t)
+		if len(t) > maxNameLen {
+			maxNameLen = len(t)
+		}
+	}
+	// Print all tools in a single list, with icon, status, and aligned name
+	for _, t := range res.installed {
+		fmt.Printf("   ✓  %-*s  %*s\n", statusPad-2, "generated", maxNameLen, t)
+	}
+	for _, t := range res.skipped {
+		fmt.Printf("   ~  %-*s  %*s\n", statusPad-2, "skipped", maxNameLen, t)
+	}
+	for _, t := range res.failed {
+		fmt.Printf("   x  %-*s  %*s\n", statusPad-2, "not supported", maxNameLen, t)
 	}
 }
 
@@ -409,8 +428,8 @@ func runCompletionsStatus(shellName string) error {
 			continue
 		}
 		toolName := e.Name()
-		if isExcluded(toolName) {
-			fmt.Printf("  —  %-30s (excluded)\n", toolName)
+		if isSkipped(toolName) {
+			fmt.Printf("  ⏭️  %-30s (skipped)\n", toolName)
 			continue
 		}
 		filePath := filepath.Join(compDir, shell.fileName(toolName))

@@ -14,6 +14,7 @@ func init() {
 		Short: "A collection of Go tools",
 	}
 
+	rootCmd.AddCommand(newBuildCommand())
 	rootCmd.AddCommand(newCleanCommand())
 	rootCmd.AddCommand(newInstallCommand())
 }

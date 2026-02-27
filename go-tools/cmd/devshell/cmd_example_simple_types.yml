@@ -1,0 +1,8 @@
+# ─── TYPE DEFINITIONS ────────────────────────────────────────────────────────
+
+types:
+  greeter:
+    params:
+      name: ~          # required (~ = no default)
+      greeting: hello  # optional, defaults to "hello"
+    command: echo {{ .greeting }} {{ .name }}

@@ -8,11 +8,32 @@ import (
 	"github.com/spf13/cobra"
 )
 
-//go:embed cmd_example_simple.yml
-var exampleSimpleYAML []byte
+//go:embed cmd_example_simple_types.yml
+var exampleSimpleTypesYAML []byte
 
-//go:embed cmd_example.yml
-var exampleFullYAML []byte
+//go:embed cmd_example_simple_nodes.yml
+var exampleSimpleNodesYAML []byte
+
+//go:embed cmd_example_full_types.yml
+var exampleFullTypesYAML []byte
+
+//go:embed cmd_example_full_nodes.yml
+var exampleFullNodesYAML []byte
+
+const exampleSimpleHeader = `# devshell — quick reference
+# Run:          devshell --file <this-file> <command>
+# Full example: devshell example --full
+
+`
+
+const exampleFullHeader = `# devshell — full reference
+# ─────────────────────────────────────────────────────────────────────────────
+# This file documents every feature of the devshell DSL.
+# Run it with:     devshell --file <this-file> <command>
+# Preview it with: devshell --file <this-file> --dry-run <command>
+# ─────────────────────────────────────────────────────────────────────────────
+
+`
 
 var exampleCmd = &cobra.Command{
 	Use:   "example",
@@ -22,20 +43,38 @@ var exampleCmd = &cobra.Command{
 		"complete example. Use --output to write to a file instead of stdout.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		full, _ := cmd.Flags().GetBool("full")
-		data := exampleSimpleYAML
+
+		var header string
+		var typesYAML, nodesYAML []byte
 		if full {
-			data = exampleFullYAML
+			header = exampleFullHeader
+			typesYAML = exampleFullTypesYAML
+			nodesYAML = exampleFullNodesYAML
+		} else {
+			header = exampleSimpleHeader
+			typesYAML = exampleSimpleTypesYAML
+			nodesYAML = exampleSimpleNodesYAML
 		}
 
 		output, _ := cmd.Flags().GetString("output")
-		if output == "" {
-			os.Stdout.Write(data)
-			return nil
+		w := os.Stdout
+		if output != "" {
+			f, err := os.Create(output)
+			if err != nil {
+				return fmt.Errorf("creating %s: %w", output, err)
+			}
+			defer f.Close()
+			w = f
 		}
-		if err := os.WriteFile(output, data, 0o644); err != nil {
-			return fmt.Errorf("writing %s: %w", output, err)
+
+		fmt.Fprint(w, header)
+		w.Write(typesYAML)
+		fmt.Fprintln(w)
+		w.Write(nodesYAML)
+
+		if output != "" {
+			fmt.Fprintf(os.Stderr, "written to %s\n", output)
 		}
-		fmt.Fprintf(os.Stderr, "written to %s\n", output)
 		return nil
 	},
 }

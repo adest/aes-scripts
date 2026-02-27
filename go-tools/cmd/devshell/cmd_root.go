@@ -13,6 +13,7 @@ var rootCmd = &cobra.Command{
 	Use:   appName + " [command ...]",
 	Short: "Dynamic " + appName + " CLI",
 	Long:  "Dynamic " + appName + " CLI\n\nTasks are auto-completable via shell completion (Tab).",
+	Args:  cobra.ArbitraryArgs,
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return dynamicCompletion(flagFiles, flagRegistryDirs, args, toComplete)
 	},

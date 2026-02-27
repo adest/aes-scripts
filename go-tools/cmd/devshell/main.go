@@ -15,6 +15,7 @@ var (
 func main() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(exampleCmd)
+	rootCmd.AddCommand(initCmd)
 
 	rootCmd.PersistentFlags().StringArrayVarP(&flagFiles, "file", "f", nil,
 		"node YAML file (repeatable; default: ~/.config/"+appName+"/nodes/*.yml)")

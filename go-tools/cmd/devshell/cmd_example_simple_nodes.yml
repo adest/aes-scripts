@@ -1,16 +1,5 @@
-# devshell — quick reference
-# Run:          devshell --file <this-file> <command>
-# Full example: devshell example --full
-
-# ─── TYPE DEFINITIONS ────────────────────────────────────────────────────────
-types:
-  greeter:
-    params:
-      name: ~          # required (~ = no default)
-      greeting: hello  # optional, defaults to "hello"
-    command: echo {{ .greeting }} {{ .name }}
-
 # ─── NODES ───────────────────────────────────────────────────────────────────
+
 nodes:
 
   # Runnable: simple command

@@ -4,3 +4,5 @@ dist/
 .vscode/
 # Ignore local config file for go-tools repo root
 cmd/go-tools/config_local.go
+# Ignore the roadmap file
+ROADMAP.md

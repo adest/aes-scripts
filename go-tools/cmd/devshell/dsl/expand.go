@@ -89,6 +89,7 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 			Argv:     argv,
 			Cwd:      cwd,
 			Env:      r.Env,
+			Inputs:   r.Inputs,
 		}, nil
 	}
 
@@ -109,13 +110,19 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 			return nil, fmt.Errorf("phase=expand path=%s: %w", path, err)
 		}
 
-		// Substitute {{ .paramName }} in all string fields of the type body.
+		// Substitute {{ params.name }} in all string fields of the type body.
+		// {{ inputs.name }} and {{ steps.id.stream }} are preserved as literals.
 		substituted, err := applyTemplates(typeDef.Body, params)
 		if err != nil {
 			return nil, fmt.Errorf("phase=expand path=%s: template: %w", path, err)
 		}
 
-		// §5.2: The abstract node's name always takes priority.
+		// Propagate the type's runtime inputs onto the substituted body so that
+		// expandNode (when it reaches the runnable/pipeline leaf) can attach them
+		// to the resulting node.
+		substituted.Inputs = typeDef.Inputs
+
+		// §6.2: The abstract node's name always takes priority.
 		// Setting it here (before recursing) also handles type bodies that
 		// declare no name — expandNode requires a non-empty name.
 		substituted.Name = r.Name
@@ -155,6 +162,9 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 		if err != nil {
 			return nil, fmt.Errorf("phase=expand path=%s: template: %w", path, err)
 		}
+
+		// Propagate the type's runtime inputs onto the substituted body.
+		substituted.Inputs = typeDef.Inputs
 
 		// If the type body declares no name (and no template produced one),
 		// fall back to the type name itself so expandNode doesn't reject it.
@@ -210,11 +220,11 @@ func expandNode(r RawNode, reg *Registry, stack []string, path string) (Node, er
 func expandPipeline(r RawNode, path string) (*Pipeline, error) {
 	// Re-validate steps: catches issues in type-body pipelines that were not
 	// seen during Phase 1 (which only validates top-level nodes).
-	if err := validateRawSteps(r.Steps, path); err != nil {
+	if err := validateRawSteps(r.Steps, path, r.Inputs); err != nil {
 		return nil, fmt.Errorf("phase=expand %w", err)
 	}
 
-	p := &Pipeline{NodeName: r.Name}
+	p := &Pipeline{NodeName: r.Name, Inputs: r.Inputs}
 
 	for i, raw := range r.Steps {
 		// Build the final argv from whichever command form was used.

@@ -18,11 +18,16 @@ type Container struct {
 // Argv holds the argument vector: Argv[0] is the executable, Argv[1:] are the arguments.
 // Cwd is optional; empty means use the process working directory.
 // Env is optional extra environment variables merged into the process environment.
+// Inputs declares the runtime inputs for this node: nil value = required,
+// non-nil = optional with that string as the default.
+// Elements of Argv, Cwd, and Env values may contain {{ inputs.name }} references
+// that are resolved at execution time after inputs are collected.
 type Runnable struct {
 	NodeName string
 	Argv     []string
 	Cwd      string
 	Env      map[string]string
+	Inputs   map[string]*string
 }
 
 // Pipeline is an executable node containing an ordered sequence of steps.
@@ -30,9 +35,11 @@ type Runnable struct {
 // Steps are executed synchronously, in declaration order.
 // By default, the pipeline is fail-fast: the first failing step stops execution.
 // Each step can override this with its own OnFail policy.
+// Inputs declares the runtime inputs for this pipeline, collected before execution begins.
 type Pipeline struct {
 	NodeName string
 	Steps    []PipelineStep
+	Inputs   map[string]*string
 }
 
 // PipelineStep is a single step within a Pipeline: an executable command

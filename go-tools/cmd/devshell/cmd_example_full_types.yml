@@ -7,23 +7,23 @@ types:
   # ── Simple runnable type ──────────────────────────────────────────────────
   # Demonstrates: required param, optional param with default, template substitution.
   greeter:
-    name: "greet-{{ .name }}"  # fallback child name in multi-type expansion
+    name: "greet-{{ params.name }}"  # fallback child name in multi-type expansion
     params:
       name: ~            # required — caller must supply a value
       greeting: hello    # optional — defaults to "hello"
-    command: echo {{ .greeting }} {{ .name }}
+    command: echo {{ params.greeting }} {{ params.name }}
 
   # ── Container type ────────────────────────────────────────────────────────
   # Demonstrates: type that expands into multiple named children.
   lifecycle:
-    name: "lifecycle-{{ .subject }}"  # fallback child name in multi-type expansion
+    name: "lifecycle-{{ params.subject }}"  # fallback child name in multi-type expansion
     params:
       subject: ~
     children:
       - name: start
-        command: echo starting {{ .subject }}
+        command: echo starting {{ params.subject }}
       - name: stop
-        command: echo stopped {{ .subject }}
+        command: echo stopped {{ params.subject }}
 
   # ── Pipeline type ─────────────────────────────────────────────────────────
   # Demonstrates: type that expands into a pipeline with capture and injection.
@@ -34,12 +34,12 @@ types:
       - id: listing
         command: ls
         args:
-          - "{{ .path }}"
+          - "{{ params.path }}"
         capture: stdout
         tee: true          # stream to terminal AND buffer for later steps
       - command: echo
         args:
-          - "done listing {{ .path }}"
+          - "done listing {{ params.path }}"
 
   # ── Nested type ───────────────────────────────────────────────────────────
   # Demonstrates: a type whose body itself uses other types (recursive expansion).
@@ -51,9 +51,9 @@ types:
       - name: greet-first
         uses: greeter
         with:
-          name: "{{ .first }}"
+          name: "{{ params.first }}"
       - name: greet-second
         uses: greeter
         with:
-          name: "{{ .second }}"
+          name: "{{ params.second }}"
           greeting: hey

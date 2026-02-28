@@ -1,63 +1,44 @@
 package dsl
 
 import (
-	"bytes"
 	"fmt"
 	"regexp"
 	"strings"
-	"text/template"
 )
 
-// stepRefRe matches a step output reference: {{ steps.<id>.<stream> }}
+// templateRe matches the three recognized template namespaces:
 //
-// Step output references are execution-time constructs and must NOT be
-// processed by the Go template engine during Phase 2 (type param expansion).
-// They are escaped before template execution and restored afterward.
+//   - {{ params.name }}  — expansion-time param substitution (Phase 2)
+//   - {{ inputs.name }}  — runtime input reference (preserved as literal in Phase 2)
+//   - {{ steps.id.stream }} — pipeline step output reference (preserved as literal)
 //
-// Valid examples: {{ steps.bw.stdout }}, {{steps.my-step.stderr}}
-var stepRefRe = regexp.MustCompile(`\{\{\s*steps\.([A-Za-z0-9_][A-Za-z0-9_-]*)\.(\w+)\s*\}\}`)
+// Capture groups:
+//
+//	[1] namespace: "params", "inputs", or "steps"
+//	[2] first name segment (param/input name, or step id)
+//	[3] second name segment (stream name, only for "steps")
+var templateRe = regexp.MustCompile(
+	`\{\{\s*(params|inputs|steps)\.([A-Za-z0-9_][A-Za-z0-9_-]*)(?:\.([A-Za-z0-9_][A-Za-z0-9_-]*))?\s*\}\}`,
+)
 
-// escapeStepRefs replaces every step output reference in s with a safe
-// placeholder so that the Go template engine ignores it.
-//
-// Returns the modified string and the original references in order,
-// so that restoreStepRefs can put them back after template execution.
-//
-// Placeholders use ASCII NUL bytes as boundaries (e.g. "\x000\x00")
-// which cannot appear in valid YAML strings.
-func escapeStepRefs(s string) (escaped string, refs []string) {
-	escaped = stepRefRe.ReplaceAllStringFunc(s, func(match string) string {
-		idx := len(refs)
-		refs = append(refs, match)
-		return fmt.Sprintf("\x00%d\x00", idx) // NUL-bounded index as placeholder
-	})
-	return
-}
+// anyTemplateRe matches any {{ ... }} expression, used after substitution to
+// detect unrecognized template markers that were not processed.
+var anyTemplateRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
 
-// restoreStepRefs replaces placeholders written by escapeStepRefs with the
-// original step output references.
-func restoreStepRefs(s string, refs []string) string {
-	for i, ref := range refs {
-		s = strings.ReplaceAll(s, fmt.Sprintf("\x00%d\x00", i), ref)
-	}
-	return s
-}
-
-// applyTemplates returns a deep copy of r with all string fields substituted
-// using Go template syntax and the provided params map.
+// applyTemplates returns a deep copy of r with all {{ params.name }} expressions
+// substituted using the provided params map.
+//
+// {{ inputs.name }} and {{ steps.id.stream }} expressions are preserved as
+// literals — they are execution-time constructs resolved by the executor.
 //
 // Fields subject to substitution: Name, Command, Cwd, Env values, nested With
-// values, and all Children recursively.
-//
-// Template syntax: {{ .paramName }}
-// The template data is map[string]string, so .paramName resolves params["paramName"].
-//
-// Substitution happens before child types are expanded, so template values
-// (including nested `with` values) flow correctly into nested type expansions.
+// values, and all Children and Steps recursively.
 func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 	var err error
-	// Start with a shallow copy; we'll replace each field that needs substitution.
 	out := r
+
+	// Copy Inputs as-is — input declarations are not templates.
+	out.Inputs = r.Inputs
 
 	out.Name, err = substituteString(r.Name, params)
 	if err != nil {
@@ -65,8 +46,6 @@ func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 	}
 
 	if r.Command != nil {
-		// String form: apply template to the whole string.
-		// Splitting into argv happens later in expand.go, after substitution.
 		s, err := substituteString(*r.Command, params)
 		if err != nil {
 			return RawNode{}, fmt.Errorf("command: %w", err)
@@ -75,7 +54,6 @@ func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 	}
 
 	if r.Argv != nil {
-		// Array/long form: apply template to each token independently.
 		out.Argv = make([]string, len(r.Argv))
 		for i, token := range r.Argv {
 			s, err := substituteString(token, params)
@@ -122,9 +100,6 @@ func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 		out.With = &wb
 	}
 
-	// Pipeline steps: apply type-param substitution to each step's string fields.
-	// Step output references ({{ steps.X.Y }}) inside those fields are preserved
-	// as literals by substituteString — they are execution-time, not expansion-time.
 	if len(r.Steps) > 0 {
 		out.Steps = make([]RawStep, len(r.Steps))
 		for i, step := range r.Steps {
@@ -139,14 +114,14 @@ func applyTemplates(r RawNode, params map[string]string) (RawNode, error) {
 	return out, nil
 }
 
-// applyTemplatesToStep applies Go template substitution to the string fields
-// of a single pipeline step.
+// applyTemplatesToStep applies {{ params.name }} substitution to the string
+// fields of a single pipeline step.
 //
-// The ID and Stdin fields are intentionally left untouched:
+// ID and Stdin are intentionally left untouched:
 //   - ID must be a static identifier (no template expressions allowed).
 //   - Stdin is already a step reference string, not a template string.
 func applyTemplatesToStep(step RawStep, params map[string]string) (RawStep, error) {
-	out := step // shallow copy; we replace fields that need substitution
+	out := step
 
 	if step.Command != nil {
 		s, err := substituteString(*step.Command, params)
@@ -189,9 +164,9 @@ func applyTemplatesToStep(step RawStep, params map[string]string) (RawStep, erro
 	return out, nil
 }
 
-// applyTemplatesToWith substitutes template expressions in all string values
-// of a WithBlock. This handles the case where a type body passes templated
-// values to a nested type via `with`.
+// applyTemplatesToWith substitutes {{ params.name }} in all string values of a
+// WithBlock, handling the case where a type body passes templated values to a
+// nested type via `with`.
 func applyTemplatesToWith(wb WithBlock, params map[string]string) (WithBlock, error) {
 	if wb.Shared != nil {
 		out := make(map[string]string, len(wb.Shared))
@@ -220,35 +195,63 @@ func applyTemplatesToWith(wb WithBlock, params map[string]string) (WithBlock, er
 	return WithBlock{PerType: out}, nil
 }
 
-// substituteString applies Go template substitution to s using params as the
-// template data. Returns s unchanged if it contains no template markers (fast path).
+// substituteString resolves {{ params.name }} expressions in s using the
+// provided params map. Returns s unchanged if it contains no {{ markers (fast path).
 //
-// Step output references ({{ steps.<id>.<stream> }}) are preserved as literals:
-// they are escaped before template execution and restored afterward, so that the
-// Go template engine never sees them. They are resolved at execution time instead.
+// {{ inputs.name }} and {{ steps.id.stream }} expressions are preserved as
+// literals — they are execution-time constructs and must not be resolved here.
 //
-// Using missingkey=error so that a template referencing a param that was not
-// resolved surfaces as an explicit error rather than silently producing "<no value>".
+// Any {{ ... }} expression that does not match a recognized namespace
+// (params, inputs, steps) is treated as an error, providing a clear migration
+// message for the old {{ .param }} syntax.
 func substituteString(s string, params map[string]string) (string, error) {
-	// Fast path: skip parsing entirely when there are no template markers.
 	if !strings.Contains(s, "{{") {
 		return s, nil
 	}
 
-	// Escape step output references so the Go template engine does not try
-	// to resolve them (they are execution-time, not expansion-time).
-	safe, refs := escapeStepRefs(s)
+	locs := templateRe.FindAllStringSubmatchIndex(s, -1)
 
-	t, err := template.New("").Option("missingkey=error").Parse(safe)
-	if err != nil {
-		return "", fmt.Errorf("template parse error in %q: %w", s, err)
+	var buf strings.Builder
+	last := 0
+	for _, loc := range locs {
+		// loc[0]:loc[1] = full match
+		// loc[2]:loc[3] = namespace
+		// loc[4]:loc[5] = first name segment
+		// loc[6]:loc[7] = second name segment (may be -1 if absent)
+		buf.WriteString(s[last:loc[0]])
+		namespace := s[loc[2]:loc[3]]
+
+		switch namespace {
+		case "params":
+			name := s[loc[4]:loc[5]]
+			v, ok := params[name]
+			if !ok {
+				return "", fmt.Errorf("unknown param %q in %q", name, s)
+			}
+			buf.WriteString(v)
+		case "inputs", "steps":
+			// Preserve as literal for execution-time resolution.
+			buf.WriteString(s[loc[0]:loc[1]])
+		}
+		last = loc[1]
+	}
+	buf.WriteString(s[last:])
+	result := buf.String()
+
+	// After substitution, detect any {{ ... }} that remain but were NOT matched
+	// by templateRe (e.g. old {{ .param }} syntax). Preserved inputs/steps
+	// literals are fine — only truly unrecognized patterns should error.
+	if strings.Contains(result, "{{") {
+		for _, m := range anyTemplateRe.FindAllString(result, -1) {
+			if !templateRe.MatchString(m) {
+				return "", fmt.Errorf(
+					"unrecognized template expression %q in %q — "+
+						"valid forms: {{ params.name }}, {{ inputs.name }}, {{ steps.id.stream }}",
+					m, s,
+				)
+			}
+		}
 	}
 
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, params); err != nil {
-		return "", fmt.Errorf("template execute error in %q: %w", s, err)
-	}
-
-	// Restore the original step output references after template execution.
-	return restoreStepRefs(buf.String(), refs), nil
+	return result, nil
 }

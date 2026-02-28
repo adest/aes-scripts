@@ -5,4 +5,4 @@ types:
     params:
       name: ~          # required (~ = no default)
       greeting: hello  # optional, defaults to "hello"
-    command: echo {{ .greeting }} {{ .name }}
+    command: echo {{ params.greeting }} {{ params.name }}

@@ -34,12 +34,15 @@ type yamlDocument struct {
 }
 
 // yamlTypeDef is the YAML representation of a type definition.
-// The `params` block sits at the same level as the node body fields.
+// The `params` and `inputs` blocks sit at the same level as the node body fields.
 type yamlTypeDef struct {
 	// Params maps parameter names to their default values.
 	// A YAML null (~) is decoded as nil, meaning the parameter is required.
 	// Any scalar (string, number) is decoded as the default value.
 	Params map[string]interface{} `yaml:"params,omitempty"`
+
+	// Inputs maps runtime input names to their default values (same semantics as Params).
+	Inputs map[string]interface{} `yaml:"inputs,omitempty"`
 
 	// Node body fields — same as yamlRawNode.
 	Name string `yaml:"name"`
@@ -57,8 +60,8 @@ type yamlTypeDef struct {
 	// *yaml.Node fields correctly when decoding into a struct — the Kind ends
 	// up as 0. A non-pointer yaml.Node is decoded correctly.
 	// An absent `with` key is detected by checking With.Kind == 0.
-	With  yaml.Node   `yaml:"with,omitempty"`
-	Steps []yamlStep  `yaml:"steps,omitempty"`
+	With  yaml.Node  `yaml:"with,omitempty"`
+	Steps []yamlStep `yaml:"steps,omitempty"`
 }
 
 // yamlRawNode is the YAML representation of a node.
@@ -68,11 +71,12 @@ type yamlRawNode struct {
 	Name string `yaml:"name"`
 	// Command uses yaml.Node for polymorphic decoding (string or sequence).
 	// An absent `command` key is detected by checking Command.Kind == 0.
-	Command  yaml.Node         `yaml:"command,omitempty"`
-	Args     []string          `yaml:"args,omitempty"`
-	Cwd      *string           `yaml:"cwd,omitempty"`
-	Env      map[string]string `yaml:"env,omitempty"`
-	Children []yamlRawNode     `yaml:"children,omitempty"`
+	Command  yaml.Node              `yaml:"command,omitempty"`
+	Args     []string               `yaml:"args,omitempty"`
+	Cwd      *string                `yaml:"cwd,omitempty"`
+	Env      map[string]string      `yaml:"env,omitempty"`
+	Children []yamlRawNode          `yaml:"children,omitempty"`
+	Inputs   map[string]interface{} `yaml:"inputs,omitempty"`
 	// Uses uses yaml.Node for polymorphic decoding (string or sequence).
 	// An absent `uses` key is detected by checking Uses.Kind == 0.
 	Uses  yaml.Node  `yaml:"uses,omitempty"`
@@ -170,10 +174,17 @@ func convertTypeDefs(raw map[string]yamlTypeDef) (map[string]dsl.TypeDef, error)
 func convertTypeDef(ytd yamlTypeDef) (dsl.TypeDef, error) {
 	params, err := convertParams(ytd.Params)
 	if err != nil {
-		return dsl.TypeDef{}, err
+		return dsl.TypeDef{}, fmt.Errorf("params: %w", err)
+	}
+
+	inputs, err := convertParams(ytd.Inputs)
+	if err != nil {
+		return dsl.TypeDef{}, fmt.Errorf("inputs: %w", err)
 	}
 
 	// Reuse node conversion by wrapping the type body fields.
+	// Note: the type body's `inputs` field is set on the RawNode so that
+	// expand.go can propagate it to the resulting concrete node.
 	body, err := convertNode(yamlRawNode{
 		Name:     ytd.Name,
 		Command:  ytd.Command,
@@ -189,10 +200,10 @@ func convertTypeDef(ytd yamlTypeDef) (dsl.TypeDef, error) {
 		return dsl.TypeDef{}, err
 	}
 
-	return dsl.TypeDef{Params: params, Body: body}, nil
+	return dsl.TypeDef{Params: params, Inputs: inputs, Body: body}, nil
 }
 
-// convertParams converts a YAML params block to dsl.ParamDefs.
+// convertParams converts a YAML params or inputs block to dsl.ParamDefs.
 //
 // Conversion rules:
 //   - null value (~)  → nil pointer  (parameter is required)
@@ -200,22 +211,21 @@ func convertTypeDef(ytd yamlTypeDef) (dsl.TypeDef, error) {
 //
 // Numbers are valid defaults and are normalised to their string representation.
 //
-// Param names must be valid Go identifiers because they are referenced via
-// {{ .paramName }} in Go templates. A hyphen like "my-param" would be parsed
-// by the template engine as subtraction rather than as a field name.
-// Use underscores instead: "my_param" → {{ .my_param }}.
+// Names must start with a letter or underscore, followed by letters, digits,
+// underscores, or hyphens — matching the pattern [A-Za-z_][A-Za-z0-9_-]*.
+// Referenced as {{ params.name }} or {{ inputs.name }} in templates.
 func convertParams(raw map[string]interface{}) (dsl.ParamDefs, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	defs := make(dsl.ParamDefs, len(raw))
 	for k, v := range raw {
-		if !isGoIdentifier(k) {
+		if !isValidParamName(k) {
 			return nil, fmt.Errorf(
-				"param %q: invalid name: param names must be valid Go identifiers "+
-					"(letters, digits, and underscores only — no hyphens); "+
-					"hint: rename to %q and use {{ .%s }} in templates",
-				k, toSnakeCase(k), toSnakeCase(k),
+				"name %q is invalid: names must start with a letter or underscore, "+
+					"followed by letters, digits, underscores, or hyphens "+
+					"(e.g. \"my-param\" → {{ params.my-param }})",
+				k,
 			)
 		}
 		if v == nil {
@@ -228,10 +238,10 @@ func convertParams(raw map[string]interface{}) (dsl.ParamDefs, error) {
 	return defs, nil
 }
 
-// isGoIdentifier reports whether s is a valid Go identifier:
-// a non-empty string of letters, digits, and underscores that does not
-// start with a digit.
-func isGoIdentifier(s string) bool {
+// isValidParamName reports whether s is a valid param or input name:
+// a non-empty string that starts with a letter or underscore, followed by
+// letters, digits, underscores, or hyphens — pattern [A-Za-z_][A-Za-z0-9_-]*.
+func isValidParamName(s string) bool {
 	if s == "" {
 		return false
 	}
@@ -241,24 +251,13 @@ func isGoIdentifier(s string) bool {
 			// always valid
 		case unicode.IsDigit(r) && i > 0:
 			// valid except as first character
+		case r == '-' && i > 0:
+			// hyphens allowed after the first character
 		default:
 			return false
 		}
 	}
 	return true
-}
-
-// toSnakeCase replaces hyphens with underscores, used only for error hint messages.
-func toSnakeCase(s string) string {
-	out := make([]byte, len(s))
-	for i := range s {
-		if s[i] == '-' {
-			out[i] = '_'
-		} else {
-			out[i] = s[i]
-		}
-	}
-	return string(out)
 }
 
 // convertNodes converts a slice of yamlRawNode to []dsl.RawNode.
@@ -340,6 +339,15 @@ func convertNode(yn yamlRawNode) (dsl.RawNode, error) {
 			return dsl.RawNode{}, fmt.Errorf("with: %w", err)
 		}
 		r.With = &wb
+	}
+
+	// --- inputs ---
+	if yn.Inputs != nil {
+		inputs, err := convertParams(yn.Inputs)
+		if err != nil {
+			return dsl.RawNode{}, fmt.Errorf("inputs: %w", err)
+		}
+		r.Inputs = inputs
 	}
 
 	// --- steps ---

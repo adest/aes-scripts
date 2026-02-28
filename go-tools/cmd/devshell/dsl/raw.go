@@ -91,7 +91,7 @@ type RawStep struct {
 //   - Command (*string): the compact string form. Template substitution is applied
 //     to the whole string first; the result is split into argv with strings.Fields
 //     during expansion. This preserves template expressions that span tokens
-//     (e.g. "docker compose -f {{ .file }} up -d").
+//     (e.g. "docker compose -f {{ params.file }} up -d").
 //
 //   - Argv ([]string): the pre-tokenized form, produced by either the array form
 //     ("command: [...]") or the long form ("command: exe" + "args: [...]").
@@ -113,6 +113,13 @@ type RawNode struct {
 	// With holds parameters passed to the types referenced in Uses.
 	// It is nil when the node has no `with` block.
 	With *WithBlock
+
+	// Inputs declares the runtime inputs for this node.
+	// Only valid on runnable nodes (command) and pipeline nodes (steps).
+	// Forbidden on container nodes (children) and abstract nodes (uses).
+	// nil value → required input; non-nil string → optional with that default.
+	// Referenced in commands via {{ inputs.name }}, resolved at execution time.
+	Inputs ParamDefs
 }
 
 // WithBlock holds the parameters passed to a type via the `with` key.

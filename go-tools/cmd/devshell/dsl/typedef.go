@@ -10,11 +10,18 @@ type TypeDef struct {
 	// Params may be nil if the type accepts no parameters.
 	Params ParamDefs
 
+	// Inputs declares the runtime inputs this type requires.
+	// These are propagated onto the concrete node produced by expansion.
+	// Referenced in the type body via {{ inputs.name }}, resolved at execution time.
+	// Inputs may be nil if the type declares no runtime inputs.
+	Inputs ParamDefs
+
 	// Body is the RawNode that defines the type's structure.
 	// All string fields in Body (name, command, cwd, env values, nested with
-	// values, and child names) are treated as Go templates:
-	//   {{ .paramName }}
-	// They are substituted with the resolved parameter values before expansion.
+	// values, and child names) support template substitution:
+	//   {{ params.paramName }} — resolved at expansion time (Phase 2)
+	//   {{ inputs.inputName }} — preserved as literal, resolved at execution time
+	//   {{ steps.id.stream }}  — preserved as literal, resolved at execution time
 	Body RawNode
 }
 

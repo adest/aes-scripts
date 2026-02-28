@@ -733,9 +733,9 @@ types:
       file: ~
     children:
       - name: up
-        command: docker compose -f {{ .file }} up -d
+        command: docker compose -f {{ params.file }} up -d
       - name: down
-        command: docker compose -f {{ .file }} down
+        command: docker compose -f {{ params.file }} down
 nodes:
   - name: stack
     uses: docker-compose
@@ -792,9 +792,9 @@ types:
       file: ~
     children:
       - name: up
-        command: docker compose -f {{ .file }} up -d
+        command: docker compose -f {{ params.file }} up -d
       - name: stop
-        command: docker compose -f {{ .file }} stop
+        command: docker compose -f {{ params.file }} stop
 nodes:
   - name: stack
     uses:
@@ -815,12 +815,12 @@ types:
     params:
       host: ~
     name: service-a
-    command: start {{ .host }}
+    command: start {{ params.host }}
   svc-b:
     params:
       port: ~
     name: service-b
-    command: start :{{ .port }}
+    command: start :{{ params.port }}
 nodes:
   - name: stack
     uses:
@@ -908,7 +908,7 @@ types:
   greeter:
     params:
       name: ~
-    command: echo hello {{ .name }}
+    command: echo hello {{ params.name }}
 nodes:
   - name: greet
     uses:
@@ -926,7 +926,7 @@ types:
   greeter:
     params:
       name: ~
-    command: echo hello {{ .name }}
+    command: echo hello {{ params.name }}
 nodes:
   - name: greet
     uses:
@@ -944,7 +944,7 @@ types:
   greeter:
     params:
       name: ~
-    command: echo hello {{ .name }}
+    command: echo hello {{ params.name }}
 nodes:
   - name: greet
     uses:
@@ -997,7 +997,7 @@ types:
     params:
       file: ~
       profile: dev
-    command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+    command: docker compose -f {{ params.file }} --profile {{ params.profile }} up -d
 nodes:
   - name: stack
     uses:
@@ -1017,7 +1017,7 @@ types:
     params:
       file: ~
       profile: dev
-    command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+    command: docker compose -f {{ params.file }} --profile {{ params.profile }} up -d
 nodes:
   - name: stack
     uses:
@@ -1037,7 +1037,7 @@ types:
   server:
     params:
       port: 8080
-    command: ./server --port {{ .port }}
+    command: ./server --port {{ params.port }}
 nodes:
   - name: srv
     uses:
@@ -1053,7 +1053,7 @@ types:
   server:
     params:
       port: ~
-    command: ./server --port {{ .port }}
+    command: ./server --port {{ params.port }}
 nodes:
   - name: srv
     uses:
@@ -1072,7 +1072,7 @@ types:
     params:
       image: ~
       tag: ~
-    command: docker run {{ .image }}:{{ .tag }}
+    command: docker run {{ params.image }}:{{ params.tag }}
 nodes:
   - name: run
     uses:
@@ -1092,7 +1092,7 @@ types:
     params:
       host: localhost
       port: 8080
-    command: ./server {{ .host }}:{{ .port }}
+    command: ./server {{ params.host }}:{{ params.port }}
 nodes:
   - name: srv
     uses:
@@ -1114,7 +1114,7 @@ types:
   runner:
     params:
       script: ~
-    command: bash {{ .script }}
+    command: bash {{ params.script }}
 nodes:
   - name: x
     uses:
@@ -1133,7 +1133,7 @@ types:
     params:
       dir: ~
     command: go build ./...
-    cwd: "{{ .dir }}"
+    cwd: "{{ params.dir }}"
 nodes:
   - name: build
     uses:
@@ -1156,7 +1156,7 @@ types:
       mod: vendor
     command: go build ./...
     env:
-      GOFLAGS: "-mod={{ .mod }}"
+      GOFLAGS: "-mod={{ params.mod }}"
 nodes:
   - name: build
     uses:
@@ -1178,10 +1178,10 @@ types:
     params:
       svc: ~
     children:
-      - name: "{{ .svc }}-up"
-        command: docker compose up {{ .svc }}
-      - name: "{{ .svc }}-down"
-        command: docker compose down {{ .svc }}
+      - name: "{{ params.svc }}-up"
+        command: docker compose up {{ params.svc }}
+      - name: "{{ params.svc }}-down"
+        command: docker compose down {{ params.svc }}
 nodes:
   - name: stack
     uses:
@@ -1203,8 +1203,8 @@ types:
   svc:
     params:
       id: ~
-    name: "svc-{{ .id }}"
-    command: start {{ .id }}
+    name: "svc-{{ params.id }}"
+    command: start {{ params.id }}
 nodes:
   - name: stack
     uses:
@@ -1228,8 +1228,8 @@ types:
   svc:
     params:
       id: ~
-    name: "{{ .id }}"
-    command: start {{ .id }}
+    name: "{{ params.id }}"
+    command: start {{ params.id }}
 nodes:
   - name: stack
     uses:
@@ -1248,7 +1248,7 @@ nodes:
 	})
 
 	t.Run("template in nested with value flows into inner type", func(t *testing.T) {
-		// Param names used in {{ .name }} templates must be valid Go identifiers.
+		// Param names used in {{ params.name }} templates must be valid Go identifiers.
 		// Hyphens are not allowed (they are the subtraction operator in templates).
 		// Use underscores: "compose_file" not "compose-file".
 		yml := `
@@ -1256,7 +1256,7 @@ types:
   docker-compose:
     params:
       file: ~
-    command: docker compose -f {{ .file }} up -d
+    command: docker compose -f {{ params.file }} up -d
 
   full-stack:
     params:
@@ -1266,7 +1266,7 @@ types:
         uses:
           - docker-compose
         with:
-          file: "{{ .compose_file }}"
+          file: "{{ params.compose_file }}"
 
 nodes:
   - name: prod
@@ -1281,8 +1281,8 @@ nodes:
 			"docker compose -f docker-compose.prod.yml up -d")
 	})
 
-	t.Run("param name with hyphen → parse error with hint", func(t *testing.T) {
-		// Hyphens in param names are rejected at parse time with a clear hint.
+	t.Run("param name with hyphen → accepted", func(t *testing.T) {
+		// Hyphens in param names are allowed after the first character.
 		yml := `
 types:
   svc:
@@ -1296,8 +1296,7 @@ nodes:
     with:
       compose-file: val
 `
-		err := requireBuildErr(t, yml, "compose-file", "hint")
-		_ = err
+		requireBuildOK(t, yml)
 	})
 
 	t.Run("template with no markers: string returned unchanged (fast path)", func(t *testing.T) {
@@ -1638,7 +1637,7 @@ types:
   docker-compose:
     params:
       env: ~
-    name: "compose-{{ .env }}"
+    name: "compose-{{ params.env }}"
     children:
       - name: up
         command: docker compose up -d
@@ -1737,8 +1736,8 @@ types:
   svc:
     params:
       id: ~
-    name: "svc-{{ .id }}"
-    command: start {{ .id }}
+    name: "svc-{{ params.id }}"
+    command: start {{ params.id }}
 nodes:
   - name: stack
     uses:
@@ -1789,7 +1788,7 @@ types:
   t:
     params:
       x: ~
-    command: echo {{ .x }}
+    command: echo {{ params.x }}
 nodes:
   - name: n
     uses:
@@ -1804,7 +1803,7 @@ types:
   t:
     params:
       x: ~
-    command: echo {{ .x }}
+    command: echo {{ params.x }}
 nodes:
   - name: n
     uses:
@@ -1892,9 +1891,9 @@ types:
       profile: dev
     children:
       - name: up
-        command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+        command: docker compose -f {{ params.file }} --profile {{ params.profile }} up -d
       - name: stop
-        command: docker compose -f {{ .file }} stop
+        command: docker compose -f {{ params.file }} stop
 
 nodes:
   - name: stack
@@ -2161,9 +2160,9 @@ types:
       - name: lifecycle
         children:
           - name: up
-            command: docker compose -f {{ .file }} --profile {{ .profile }} up -d
+            command: docker compose -f {{ params.file }} --profile {{ params.profile }} up -d
           - name: stop
-            command: docker compose -f {{ .file }} stop
+            command: docker compose -f {{ params.file }} stop
 
 nodes:
   - name: app
@@ -2206,14 +2205,13 @@ nodes:
 
 func TestBuild_SpecExample_NestedParameterisedTypes(t *testing.T) {
 	// Reproduces the full-stack nested parameterised types example from §11.
-	// Note: param names used in {{ .name }} templates must be valid Go
-	// identifiers — underscores instead of hyphens.
+	// Note: param names support hyphens after the first character.
 	yml := `
 types:
   docker-compose:
     params:
       file: ~
-    command: docker compose -f {{ .file }} up -d
+    command: docker compose -f {{ params.file }} up -d
 
   full-stack:
     params:
@@ -2224,9 +2222,9 @@ types:
         uses:
           - docker-compose
         with:
-          file: "{{ .compose_file }}"
+          file: "{{ params.compose_file }}"
       - name: k8s
-        command: kubectl apply -n {{ .k8s_namespace }}
+        command: kubectl apply -n {{ params.k8s_namespace }}
 
 nodes:
   - name: prod
@@ -2885,14 +2883,14 @@ types:
       - id: token
         command: get-token
         args:
-          - "{{ .registry }}"
+          - "{{ params.registry }}"
         capture: stdout
       - command: docker
         args:
           - login
-          - "{{ .registry }}"
+          - "{{ params.registry }}"
           - --username
-          - "{{ .username }}"
+          - "{{ params.username }}"
           - --password
           - "{{ steps.token.stdout }}"
 
@@ -2906,7 +2904,7 @@ nodes:
 		root := requireBuildOK(t, yml)
 		p := requirePipeline(t, root.Children[0], "login", 2)
 
-		// Step 0: type param {{ .registry }} must be substituted.
+		// Step 0: type param {{ params.registry }} must be substituted.
 		if p.Steps[0].Argv[0] != "get-token" {
 			t.Errorf("step[0] cmd: want 'get-token', got %q", p.Steps[0].Argv[0])
 		}
@@ -2914,7 +2912,7 @@ nodes:
 			t.Errorf("step[0] registry arg: want 'registry.example.com', got %q", p.Steps[0].Argv[1])
 		}
 
-		// Step 1: type param {{ .registry }} and {{ .username }} must be substituted;
+		// Step 1: type param {{ params.registry }} and {{ params.username }} must be substituted;
 		// step ref {{ steps.token.stdout }} must be preserved as a literal.
 		// Argv = ["docker", "login", registry, "--username", username, "--password", step-ref]
 		step1 := p.Steps[1]
@@ -2966,6 +2964,276 @@ nodes:
 		}
 		if p.Steps[1].Stdin.Stream != dsl.CaptureStderr {
 			t.Errorf("Stdin.Stream: want CaptureStderr, got %v", p.Steps[1].Stdin.Stream)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §5 — Runtime inputs
+// ---------------------------------------------------------------------------
+
+func TestBuild_Section5_RuntimeInputs(t *testing.T) {
+
+	t.Run("required input on runnable: propagated to Runnable.Inputs", func(t *testing.T) {
+		yml := `
+- name: deploy
+  inputs:
+    env: ~
+  command: ./deploy.sh {{ inputs.env }}
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "deploy", "./deploy.sh {{ inputs.env }}")
+		if r.Inputs == nil {
+			t.Fatal("expected Inputs to be set")
+		}
+		if _, ok := r.Inputs["env"]; !ok {
+			t.Error("expected input 'env' to be declared")
+		}
+		if r.Inputs["env"] != nil {
+			t.Error("expected input 'env' to be required (nil default)")
+		}
+	})
+
+	t.Run("optional input on runnable: default value propagated", func(t *testing.T) {
+		yml := `
+- name: greet
+  inputs:
+    name: world
+  command: echo hello {{ inputs.name }}
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "greet", "echo hello {{ inputs.name }}")
+		if r.Inputs == nil {
+			t.Fatal("expected Inputs to be set")
+		}
+		def := r.Inputs["name"]
+		if def == nil {
+			t.Fatal("expected input 'name' to have a default")
+		}
+		if *def != "world" {
+			t.Errorf("input 'name' default: want %q, got %q", "world", *def)
+		}
+	})
+
+	t.Run("inputs on pipeline: propagated to Pipeline.Inputs", func(t *testing.T) {
+		yml := `
+- name: build
+  inputs:
+    target: ~
+  steps:
+    - command: go build {{ inputs.target }}
+`
+		root := requireBuildOK(t, yml)
+		p := requirePipeline(t, root.Children[0], "build", 1)
+		if p.Inputs == nil {
+			t.Fatal("expected Pipeline.Inputs to be set")
+		}
+		if _, ok := p.Inputs["target"]; !ok {
+			t.Error("expected input 'target' to be declared")
+		}
+	})
+
+	t.Run("inputs in type definition: propagated to concrete node", func(t *testing.T) {
+		yml := `
+types:
+  deployer:
+    params:
+      script: ~
+    inputs:
+      env: ~
+    command: "{{ params.script }} {{ inputs.env }}"
+
+nodes:
+  - name: deploy
+    uses: deployer
+    with:
+      script: ./deploy.sh
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "deploy", "./deploy.sh {{ inputs.env }}")
+		if r.Inputs == nil {
+			t.Fatal("expected Inputs to be propagated from type definition")
+		}
+		if _, ok := r.Inputs["env"]; !ok {
+			t.Error("expected input 'env' to be declared")
+		}
+	})
+
+	t.Run("inputs forbidden on container node: error", func(t *testing.T) {
+		yml := `
+- name: group
+  inputs:
+    env: ~
+  children:
+    - name: sub
+      command: echo hi
+`
+		requireBuildErr(t, yml, "phase=raw", "inputs", "runnable or pipeline")
+	})
+
+	t.Run("inputs forbidden on abstract node (uses): error", func(t *testing.T) {
+		yml := `
+types:
+  svc:
+    command: echo svc
+
+nodes:
+  - name: s
+    inputs:
+      env: ~
+    uses:
+      - svc
+`
+		requireBuildErr(t, yml, "phase=raw", "inputs", "runnable or pipeline")
+	})
+
+	t.Run("undeclared {{ inputs.name }} ref in command: error", func(t *testing.T) {
+		yml := `
+- name: deploy
+  command: ./deploy.sh {{ inputs.env }}
+`
+		requireBuildErr(t, yml, "phase=raw", "unknown input", "env")
+	})
+
+	t.Run("undeclared {{ inputs.name }} ref in pipeline step: error", func(t *testing.T) {
+		yml := `
+- name: build
+  inputs:
+    target: ~
+  steps:
+    - command: go build {{ inputs.target }}
+    - command: go test {{ inputs.pkg }}
+`
+		requireBuildErr(t, yml, "phase=raw", "unknown input", "pkg")
+	})
+
+	t.Run("{{ inputs.name }} in command string form: allowed", func(t *testing.T) {
+		yml := `
+- name: run
+  inputs:
+    file: ~
+  command: bash {{ inputs.file }}
+`
+		root := requireBuildOK(t, yml)
+		requireRunnable(t, root.Children[0], "run", "bash {{ inputs.file }}")
+	})
+
+	t.Run("{{ inputs.name }} preserved as literal after type expansion", func(t *testing.T) {
+		yml := `
+types:
+  runner:
+    inputs:
+      file: ~
+    command: bash
+    args:
+      - "{{ inputs.file }}"
+
+nodes:
+  - name: run
+    uses: runner
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "run", "bash {{ inputs.file }}")
+		// The inputs.file reference must be preserved as a literal (not substituted).
+		if r.Argv[1] != "{{ inputs.file }}" {
+			t.Errorf("argv[1]: want literal '{{ inputs.file }}', got %q", r.Argv[1])
+		}
+	})
+
+	t.Run("unrecognized template expression (old {{ .param }} syntax): error", func(t *testing.T) {
+		yml := `
+types:
+  svc:
+    params:
+      port: ~
+    command: ./server --port {{ .port }}
+
+nodes:
+  - name: s
+    uses: svc
+    with:
+      port: "8080"
+`
+		requireBuildErr(t, yml, "unrecognized template expression", "{{ .port }}", "params.name")
+	})
+
+	t.Run("unrecognized {{ unknown.x }} namespace: error", func(t *testing.T) {
+		yml := `
+types:
+  svc:
+    params:
+      port: ~
+    command: ./server --port {{ env.PORT }}
+
+nodes:
+  - name: s
+    uses: svc
+    with:
+      port: "8080"
+`
+		requireBuildErr(t, yml, "unrecognized template expression", "{{ env.PORT }}")
+	})
+
+	t.Run("input name with hyphen: accepted", func(t *testing.T) {
+		yml := `
+- name: deploy
+  inputs:
+    target-env: staging
+  command: ./deploy.sh {{ inputs.target-env }}
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "deploy", "./deploy.sh {{ inputs.target-env }}")
+		if r.Inputs == nil {
+			t.Fatal("expected Inputs to be set")
+		}
+		def := r.Inputs["target-env"]
+		if def == nil || *def != "staging" {
+			t.Errorf("input 'target-env' default: want 'staging', got %v", def)
+		}
+	})
+
+	t.Run("inputs: multiple required and optional, all propagated", func(t *testing.T) {
+		yml := `
+- name: release
+  inputs:
+    version: ~
+    registry: docker.io
+    tag: latest
+  command: docker push {{ inputs.registry }}/app:{{ inputs.version }}-{{ inputs.tag }}
+`
+		root := requireBuildOK(t, yml)
+		r := requireRunnable(t, root.Children[0], "release",
+			"docker push {{ inputs.registry }}/app:{{ inputs.version }}-{{ inputs.tag }}")
+		if len(r.Inputs) != 3 {
+			t.Errorf("expected 3 inputs, got %d", len(r.Inputs))
+		}
+		// version: required
+		if r.Inputs["version"] != nil {
+			t.Error("input 'version' should be required (nil default)")
+		}
+		// registry: optional with default
+		if r.Inputs["registry"] == nil || *r.Inputs["registry"] != "docker.io" {
+			t.Errorf("input 'registry' default: want 'docker.io'")
+		}
+		// tag: optional with default
+		if r.Inputs["tag"] == nil || *r.Inputs["tag"] != "latest" {
+			t.Errorf("input 'tag' default: want 'latest'")
+		}
+	})
+
+	t.Run("inputs: error message references unrecognized {{ inputs.x }} against dsl.ErrUnknownInput", func(t *testing.T) {
+		yml := `
+- name: deploy
+  inputs:
+    env: ~
+  command: ./deploy.sh {{ inputs.env }} {{ inputs.region }}
+`
+		_, err := Build([]byte(yml))
+		if err == nil {
+			t.Fatal("expected error but got none")
+		}
+		if !errors.Is(err, dsl.ErrUnknownInput) {
+			t.Errorf("expected ErrUnknownInput in error chain, got: %v", err)
 		}
 	})
 }

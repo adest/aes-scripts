@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"go-tools/cmd/devshell/dsl"
@@ -25,23 +26,24 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		node, extraArgs, err := resolvePath(root, args)
+		node, remaining, err := resolvePath(root, args)
 		if err != nil {
 			return err
 		}
+		providedInputs, extraArgs := splitInputArgs(remaining)
 		switch n := node.(type) {
 		case *dsl.Runnable:
 			if flagDryRun {
 				dryRunRunnable(n, extraArgs)
 				return nil
 			}
-			return execute(n, extraArgs)
+			return execute(n, extraArgs, providedInputs)
 		case *dsl.Pipeline:
 			if flagDryRun {
 				dryRunPipeline(n)
 				return nil
 			}
-			return executePipeline(n)
+			return executePipeline(n, providedInputs)
 		default:
 			return fmt.Errorf("unexpected node type %T", node)
 		}
@@ -150,6 +152,26 @@ func isContainerError(navigated []string, c *dsl.Container) error {
 		name = "top level"
 	}
 	return fmt.Errorf("%q is a container, not a runnable\navailable subcommands: %s", name, childList(c))
+}
+
+// inputArgRe matches key=value CLI arguments used to supply runtime inputs.
+// Keys follow the same naming rules as param/input names (hyphens allowed after first char).
+var inputArgRe = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9_-]*)=(.*)$`)
+
+// splitInputArgs separates key=value input arguments from positional extra args.
+// Used to distinguish runtime inputs from extra argv to pass to runnables.
+func splitInputArgs(args []string) (inputs map[string]string, extras []string) {
+	for _, arg := range args {
+		if m := inputArgRe.FindStringSubmatch(arg); m != nil {
+			if inputs == nil {
+				inputs = make(map[string]string)
+			}
+			inputs[m[1]] = m[2]
+		} else {
+			extras = append(extras, arg)
+		}
+	}
+	return inputs, extras
 }
 
 // childList returns a human-readable comma-separated list of a container's child names.

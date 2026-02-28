@@ -57,6 +57,11 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 		return fmt.Errorf("phase=raw path=%s: node cannot combine command, children, uses, and steps", path)
 	}
 
+	// `inputs` is only valid on runnable and pipeline nodes.
+	if n.Inputs != nil && (hasChildren || hasUses) {
+		return fmt.Errorf("phase=raw path=%s: 'inputs' can only be declared on runnable or pipeline nodes", path)
+	}
+
 	// `with` is only valid on abstract nodes (nodes that have `uses`).
 	if n.With != nil && !hasUses {
 		return fmt.Errorf("phase=raw path=%s: 'with' can only be used on abstract nodes (requires 'uses')", path)
@@ -82,6 +87,27 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 		if empty {
 			return fmt.Errorf("phase=raw path=%s: runnable command must not be empty", path)
 		}
+		// Validate that all {{ inputs.name }} refs are declared in the inputs block.
+		if n.Command != nil {
+			if err := validateInputRefsInString(*n.Command, n.Inputs, path, "command"); err != nil {
+				return err
+			}
+		}
+		for i, token := range n.Argv {
+			if err := validateInputRefsInString(token, n.Inputs, path, fmt.Sprintf("argv[%d]", i)); err != nil {
+				return err
+			}
+		}
+		if n.Cwd != nil {
+			if err := validateInputRefsInString(*n.Cwd, n.Inputs, path, "cwd"); err != nil {
+				return err
+			}
+		}
+		for k, v := range n.Env {
+			if err := validateInputRefsInString(v, n.Inputs, path, "env["+k+"]"); err != nil {
+				return err
+			}
+		}
 
 	case hasChildren:
 		if len(n.Children) == 0 {
@@ -104,7 +130,7 @@ func validateRawNode(n RawNode, siblings map[string]struct{}, path string) error
 		}
 
 	case hasSteps:
-		if err := validateRawSteps(n.Steps, path); err != nil {
+		if err := validateRawSteps(n.Steps, path, n.Inputs); err != nil {
 			return err
 		}
 	}
@@ -130,7 +156,7 @@ type priorStepInfo struct {
 //
 // This function is called from Phase 1 for top-level pipeline nodes, and from
 // expandPipeline for type-body pipeline nodes after template substitution.
-func validateRawSteps(steps []RawStep, path string) error {
+func validateRawSteps(steps []RawStep, path string, inputDefs ParamDefs) error {
 	if len(steps) == 0 {
 		return fmt.Errorf("phase=raw path=%s: pipeline must have at least one step", path)
 	}
@@ -219,6 +245,23 @@ func validateRawSteps(steps []RawStep, path string) error {
 			}
 		}
 
+		// --- input refs in command/argv, env, cwd ---
+		for _, token := range argv {
+			if err := validateInputRefsInString(token, inputDefs, stepPath, "command/args"); err != nil {
+				return err
+			}
+		}
+		for k, v := range step.Env {
+			if err := validateInputRefsInString(v, inputDefs, stepPath, "env["+k+"]"); err != nil {
+				return err
+			}
+		}
+		if step.Cwd != nil {
+			if err := validateInputRefsInString(*step.Cwd, inputDefs, stepPath, "cwd"); err != nil {
+				return err
+			}
+		}
+
 		// --- on-fail ---
 		if err := validateOnFail(step.OnFail, stepPath); err != nil {
 			return err
@@ -287,12 +330,14 @@ func parseStdinRef(s string) (stepID string, stream CaptureMode, err error) {
 // validateStepRefsInString finds all {{ steps.<id>.<stream> }} patterns in s
 // and validates each one against the prior steps map.
 func validateStepRefsInString(s string, priorByID map[string]priorStepInfo, path, field string) error {
-	// Use the same regex as template.go (stepRefRe) to extract references.
-	matches := stepRefRe.FindAllStringSubmatch(s, -1)
+	matches := templateRe.FindAllStringSubmatch(s, -1)
 	for _, m := range matches {
-		// m[0] = full match, m[1] = id, m[2] = stream
-		id := m[1]
-		streamStr := m[2]
+		// m[1] = namespace, m[2] = first segment, m[3] = second segment
+		if m[1] != "steps" {
+			continue
+		}
+		id := m[2]
+		streamStr := m[3]
 		var stream CaptureMode
 		switch streamStr {
 		case "stdout":
@@ -304,6 +349,23 @@ func validateStepRefsInString(s string, priorByID map[string]priorStepInfo, path
 		}
 		if err := checkStepRef(id, stream, priorByID, path, field); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateInputRefsInString finds all {{ inputs.<name> }} patterns in s and
+// checks that each name is declared in inputDefs. If inputDefs is nil (no
+// inputs block declared), any {{ inputs.name }} reference is an error.
+func validateInputRefsInString(s string, inputDefs ParamDefs, path, field string) error {
+	matches := templateRe.FindAllStringSubmatch(s, -1)
+	for _, m := range matches {
+		if m[1] != "inputs" {
+			continue
+		}
+		name := m[2]
+		if _, declared := inputDefs[name]; !declared {
+			return fmt.Errorf("phase=raw path=%s: %s: %w: %s", path, field, ErrUnknownInput, name)
 		}
 	}
 	return nil

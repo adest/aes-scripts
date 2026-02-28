@@ -571,27 +571,16 @@ types:
 * A value of `null` (`~`) → input is **required**, no default
 * A scalar value → input is **optional**, value is the default
 * All input values are treated as **strings** at resolution time
-* Every `{{ inputs.name }}` reference in a node body MUST correspond to a declared input — either on the node itself or aggregated from its types
+* Every `{{ inputs.name }}` reference in a node body MUST correspond to a declared input on the node itself (or propagated from its single type)
 * Undeclared input references are a validation error
 
-## 5.3 Input Aggregation (Expansion)
+## 5.3 Input Propagation (Single-type Expansion)
 
-When a concrete node is produced by expanding one or more types, the `inputs` blocks of all expanded types are **merged** into the resulting node's input declarations.
+When a concrete runnable or pipeline node is produced by expanding a **single** type (i.e., `uses` contains exactly one entry), the type's `inputs` block is **propagated** to the resulting node.
 
-**Merge rules for the same input name across multiple types:**
+The concrete node's own `inputs` block (if any) takes precedence over the type's declarations. This allows the caller to tighten or change the defaults.
 
-| Type A | Type B | Result |
-|--------|--------|--------|
-| required (`~`) | required (`~`) | required |
-| required (`~`) | optional (default `x`) | required (strictest constraint wins) |
-| optional (default `x`) | optional (default `x`) | optional, default `x` |
-| optional (default `x`) | optional (default `y`) | **error** — conflicting defaults |
-
-The concrete node may **override** an input aggregated from a type:
-
-* Override with `~` → promotes to required, regardless of the type's default
-* Override with a scalar → replaces the type's default
-* This allows the concrete node to tighten or relax type constraints
+> **Note:** Multi-type expansion (`uses` with multiple entries) always produces a **Container**, which cannot have an `inputs` block. Each child produced from an individual type carries its own inputs independently. There is no cross-type input merging.
 
 ## 5.4 Valid Substitution Locations for `{{ inputs.name }}`
 
@@ -753,7 +742,7 @@ After expansion, nodes must satisfy:
 * Runnables must have **non-empty command**
 * Pipelines must have **at least one step** with a non-empty argv
 * No duplicate names among siblings
-* Every `{{ inputs.name }}` reference in the final node tree MUST correspond to a declared input in the enclosing executable node's `inputs` block (post-aggregation)
+* Every `{{ inputs.name }}` reference in the final node tree MUST correspond to a declared input in the enclosing executable node's `inputs` block
 
 **Note:** `{{ inputs.name }}` in `command` string form is permitted. If the resolved value contains spaces, it will affect argv splitting — the same caveat applies to `{{ params.name }}` in string form.
 
@@ -1155,19 +1144,10 @@ nodes:
 # At runtime, devshell will prompt: username?
 ```
 
-### Type inputs aggregated onto a concrete node
+### Type inputs propagated onto a concrete node (single-type)
 
 ```yaml
 types:
-  notify:
-    inputs:
-      slack-channel: "#deployments"   # optional, default provided
-    steps:
-      - command: notify-slack
-        args:
-          - "{{ inputs.slack-channel }}"
-          - "Deployment complete"
-
   deploy-app:
     params:
       env: ~
@@ -1181,15 +1161,49 @@ types:
 
 nodes:
   - name: release
+    uses: deploy-app
+    with:
+      env: production
+# Resulting Pipeline.Inputs = { tag: ~ }  (propagated from deploy-app)
+# At runtime, devshell will prompt: tag?
+```
+
+### Multi-type expansion: each child carries its own inputs
+
+When `uses` contains multiple types, a Container is produced. Each child node carries its own `inputs` independently — there is no cross-type merging.
+
+```yaml
+types:
+  notify:
+    inputs:
+      slack-channel: "#deployments"
+    steps:
+      - command: notify-slack
+        args:
+          - "{{ inputs.slack-channel }}"
+          - "Deployment complete"
+
+  deploy-app:
+    params:
+      env: ~
+    inputs:
+      tag: ~
+    steps:
+      - command: ./deploy.sh
+        args:
+          - "{{ params.env }}"
+          - "{{ inputs.tag }}"
+
+nodes:
+  - name: release
     uses:
       - deploy-app
       - notify
     with:
       env: production
-# Resulting node has aggregated inputs:
-#   tag: ~               (required, from deploy-app)
-#   slack-channel: "#deployments"  (optional, from notify)
-# At runtime, devshell will prompt: tag?
+# Produces a Container "release" with two Pipeline children:
+#   release.deploy-app  — inputs: { tag: ~ }   (prompts for tag)
+#   release.notify      — inputs: { slack-channel: "#deployments" }
 ```
 
 ### Multi-level Example

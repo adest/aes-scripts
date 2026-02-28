@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,35 +9,43 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const initRegistryHeader = "# devshell registry — type definitions\n" +
+//go:embed cmd_config_init_registry.yml
+var initRegistryYAML []byte
+
+//go:embed cmd_config_init_nodes.yml
+var initNodesYAML []byte
+
+//go:embed doc/dsl-spec.md
+var dslSpecMD []byte
+
+const configInitRegistryHeader = "# devshell registry — type definitions\n" +
 	"# ─────────────────────────────────────────────────────────────────────────────\n" +
 	"# Define reusable types here. Types are referenced via `uses` in node files.\n" +
 	"# Quick reference:  devshell example\n" +
 	"# Full docs:        devshell example --full\n" +
 	"# ─────────────────────────────────────────────────────────────────────────────\n\n"
 
-const initNodesHeader = `# devshell nodes
-# ─────────────────────────────────────────────────────────────────────────────
-# Define your commands here. Types from the registry/ directory are available.
-# Quick reference:  devshell example
-# Full docs:        devshell example --full
-# ─────────────────────────────────────────────────────────────────────────────
+const configInitNodesHeader = "# devshell nodes\n" +
+	"# ─────────────────────────────────────────────────────────────────────────────\n" +
+	"# Define your commands here. Types from the registry/ directory are available.\n" +
+	"# Quick reference:  devshell example\n" +
+	"# Full docs:        devshell example --full\n" +
+	"# ─────────────────────────────────────────────────────────────────────────────\n\n"
 
-`
-
-var initCmd = &cobra.Command{
+var configInitCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialise the devshell config directory with example files",
+	Short: "Initialise the devshell config directory with starter files",
 	Long: "Create the devshell config directory structure and populate it with\n" +
-		"starter files. By default the quick-reference examples are used.\n" +
-		"Use --full for the fully annotated versions.\n\n" +
+		"starter files. A single concrete `hello` command is created so the shell\n" +
+		"is immediately usable. All other examples are commented out behind sentinel\n" +
+		"markers and can be refreshed later with `devshell config update`.\n\n" +
 		"Directories created:\n" +
 		"  <config>/registry/   — type definitions\n" +
-		"  <config>/nodes/      — node definitions\n\n" +
+		"  <config>/nodes/      — node definitions\n" +
+		"  <config>/spec/       — DSL specification (dsl-spec.md)\n\n" +
 		"The default config directory follows the same priority as the main command:\n" +
 		"  $DEVSHELL_CONFIG_DIR > $XDG_CONFIG_HOME/devshell > ~/.config/devshell",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		full, _ := cmd.Flags().GetBool("full")
 		force, _ := cmd.Flags().GetBool("force")
 		dir, _ := cmd.Flags().GetString("dir")
 
@@ -48,19 +57,11 @@ var initCmd = &cobra.Command{
 			}
 		}
 
-		var typesYAML, nodesYAML []byte
-		if full {
-			typesYAML = exampleFullTypesYAML
-			nodesYAML = exampleFullNodesYAML
-		} else {
-			typesYAML = exampleSimpleTypesYAML
-			nodesYAML = exampleSimpleNodesYAML
-		}
-
 		registryDir := filepath.Join(dir, "registry")
 		nodesDir := filepath.Join(dir, "nodes")
+		specDir := filepath.Join(dir, "spec")
 
-		for _, d := range []string{registryDir, nodesDir} {
+		for _, d := range []string{registryDir, nodesDir, specDir} {
 			if err := os.MkdirAll(d, 0o755); err != nil {
 				return fmt.Errorf("creating directory %s: %w", d, err)
 			}
@@ -68,17 +69,22 @@ var initCmd = &cobra.Command{
 
 		registryFile := filepath.Join(registryDir, "types.yml")
 		nodesFile := filepath.Join(nodesDir, "nodes.yml")
+		specFile := filepath.Join(specDir, "dsl-spec.md")
 
-		if err := writeInitFile(registryFile, initRegistryHeader, typesYAML, force); err != nil {
+		if err := writeInitFile(registryFile, configInitRegistryHeader, initRegistryYAML, force); err != nil {
 			return err
 		}
-		if err := writeInitFile(nodesFile, initNodesHeader, nodesYAML, force); err != nil {
+		if err := writeInitFile(nodesFile, configInitNodesHeader, initNodesYAML, force); err != nil {
+			return err
+		}
+		if err := writeInitFile(specFile, "", dslSpecMD, force); err != nil {
 			return err
 		}
 
 		fmt.Fprintf(os.Stderr, "initialised %s\n", dir)
 		fmt.Fprintf(os.Stderr, "  %s\n", registryFile)
 		fmt.Fprintf(os.Stderr, "  %s\n", nodesFile)
+		fmt.Fprintf(os.Stderr, "  %s\n", specFile)
 		fmt.Fprintf(os.Stderr, "\nRun `devshell list` to see available commands.\n")
 		return nil
 	},
@@ -95,13 +101,14 @@ func writeInitFile(path, header string, content []byte, force bool) error {
 		return fmt.Errorf("creating %s: %w", path, err)
 	}
 	defer f.Close()
-	fmt.Fprint(f, header)
+	if header != "" {
+		fmt.Fprint(f, header)
+	}
 	_, err = f.Write(content)
 	return err
 }
 
 func init() {
-	initCmd.Flags().Bool("full", false, "use the full annotated examples instead of the quick reference")
-	initCmd.Flags().Bool("force", false, "overwrite existing files")
-	initCmd.Flags().String("dir", "", "target config directory (default: auto-resolved)")
+	configInitCmd.Flags().Bool("force", false, "overwrite existing files")
+	configInitCmd.Flags().String("dir", "", "target config directory (default: auto-resolved)")
 }

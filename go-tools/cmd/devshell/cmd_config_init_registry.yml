@@ -1,0 +1,12 @@
+# @devshell-examples-start
+# # ─── TYPE DEFINITIONS ────────────────────────────────────────────────────────
+#
+# types:
+#   greeter:
+#     params:
+#       name: ~          # required (~ = no default)
+#       greeting: hello  # optional, defaults to "hello"
+#     command: echo {{ params.greeting }} {{ params.name }}
+# @devshell-examples-end
+
+types: {}

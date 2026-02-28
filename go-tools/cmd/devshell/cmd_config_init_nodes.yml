@@ -59,6 +59,14 @@
 #           attempts: 3
 #           delay: 1s
 #       - command: echo done
+#
+#   # Runnable: with inputs (collected at runtime — prompted or passed as key=value)
+#   # ~ = required; a scalar value = optional with that default
+#   - name: deploy
+#     inputs:
+#       target: ~          # required — prompted if not supplied
+#       dry-run: "false"   # optional — defaults to "false"
+#     command: echo deploying to {{ inputs.target }} "(dry-run={{ inputs.dry-run }})"
 # @devshell-examples-end
 
 nodes:

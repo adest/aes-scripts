@@ -6,3 +6,10 @@ types:
       name: ~          # required (~ = no default)
       greeting: hello  # optional, defaults to "hello"
     command: echo {{ params.greeting }} {{ params.name }}
+
+  deploy:
+    params:
+      env: prod        # resolved at expansion time (via `with`)
+    inputs:
+      version: ~       # required runtime input — prompted or passed as key=value
+    command: echo deploying {{ inputs.version }} to {{ params.env }}

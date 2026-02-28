@@ -29,6 +29,16 @@ nodes:
     env:
       GREETING: hello from env
 
+  # ── RUNNABLE: with inputs ─────────────────────────────────────────────────
+  # `inputs` are collected at runtime: pass as `key=value` args or get prompted.
+  # `~` (null) → required; a scalar → optional with that string as its default.
+  # References use {{ inputs.name }} in command, args, cwd, and env values.
+  - name: greet-input
+    inputs:
+      name: ~          # required — prompted interactively if not supplied
+      greeting: hello  # optional — defaults to "hello"
+    command: echo {{ inputs.greeting }} {{ inputs.name }}
+
   # ── CONTAINER ─────────────────────────────────────────────────────────────
   # Groups related commands under a common prefix (not itself executable).
   - name: system
@@ -173,6 +183,18 @@ nodes:
         env:
           WORK_DIR: "{{ steps.dir.stdout }}"
 
+  # ── PIPELINE: with inputs ─────────────────────────────────────────────────
+  # Inputs are collected before the first step runs and available in all steps.
+  - name: deploy-input
+    inputs:
+      target: ~         # required
+      dry-run: "false"  # optional
+    steps:
+      - command: echo
+        args:
+          - "deploying to {{ inputs.target }} (dry-run={{ inputs.dry-run }})"
+      - command: echo done
+
   # ── PIPELINE: on-fail continue ────────────────────────────────────────────
   # The step's failure is recorded but execution continues to the next step.
   - name: continue-demo
@@ -197,3 +219,11 @@ nodes:
     uses: list-and-count
     with:
       path: /tmp
+
+  # ── ABSTRACT NODE: type with runtime inputs ────────────────────────────────
+  # `inputs` declared on the type are propagated to the concrete node after expansion.
+  # They are NOT supplied via `with` — they are collected at execution time.
+  - name: deploy-prod
+    uses: deploy
+    with:
+      env: production

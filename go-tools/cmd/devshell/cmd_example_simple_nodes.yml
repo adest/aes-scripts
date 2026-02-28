@@ -21,6 +21,13 @@ nodes:
       - name: uptime
         command: uptime
 
+  # Runnable: with inputs (collected at runtime, passed as key=value or prompted)
+  - name: greet-input
+    inputs:
+      name: ~          # required — prompted if not supplied
+      greeting: hello  # optional, defaults to "hello"
+    command: echo {{ inputs.greeting }} {{ inputs.name }}
+
   # Type usage
   - name: greet-world
     uses: greeter

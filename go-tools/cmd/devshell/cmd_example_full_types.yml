@@ -57,3 +57,15 @@ types:
         with:
           name: "{{ params.second }}"
           greeting: hey
+
+  # ── Type with runtime inputs ───────────────────────────────────────────────
+  # `params` are resolved at expansion time; `inputs` are collected at runtime.
+  # A type that declares `inputs` propagates them to the concrete node produced
+  # by expansion: {{ inputs.name }} is preserved as a literal until execution.
+  deploy:
+    params:
+      env: prod        # resolved at expansion time (via `with`)
+    inputs:
+      version: ~       # required runtime input — prompted or passed as key=value
+      tag: latest      # optional runtime input with default
+    command: echo deploying {{ inputs.version }}:{{ inputs.tag }} to {{ params.env }}

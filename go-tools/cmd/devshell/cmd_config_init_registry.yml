@@ -7,6 +7,16 @@
 #       name: ~          # required (~ = no default)
 #       greeting: hello  # optional, defaults to "hello"
 #     command: echo {{ params.greeting }} {{ params.name }}
+#
+#   # Type with runtime inputs:
+#   # `params` are resolved at expansion time (via `with`);
+#   # `inputs` are collected at execution time (prompted or passed as key=value).
+#   deploy:
+#     params:
+#       env: prod        # resolved at expansion time
+#     inputs:
+#       version: ~       # required runtime input
+#     command: echo deploying {{ inputs.version }} to {{ params.env }}
 # @devshell-examples-end
 
 types: {}
